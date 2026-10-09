@@ -47,7 +47,8 @@ thiserror = "2.0"
 proptest = "1.7"
 insta = { version = "1.43", features = ["yaml"] }
 
-# Signing stack — vendored (see [patch.crates-io] below)
+# Signing stack — the bergshamra family (XML security) + uppsala (XML
+# parser), from crates.io at exact pins.
 bergshamra-c14n = "=0.9.2"
 bergshamra-dsig = { version = "=0.9.2", default-features = false, features = ["rustcrypto"] }
 bergshamra-keys = { version = "=0.9.2", default-features = false, features = ["rustcrypto"] }
@@ -74,18 +75,3 @@ debug = false
 [profile.release]
 lto = "thin"
 strip = "symbols"
-
-# The bergshamra signing family resolves to the committed source under
-# third_party/vendor/, never to crates.io.
-[patch.crates-io]
-bergshamra-c14n = { path = "third_party/vendor/bergshamra-c14n" }
-bergshamra-core = { path = "third_party/vendor/bergshamra-core" }
-bergshamra-crypto = { path = "third_party/vendor/bergshamra-crypto" }
-bergshamra-dsig = { path = "third_party/vendor/bergshamra-dsig" }
-bergshamra-keys = { path = "third_party/vendor/bergshamra-keys" }
-bergshamra-pkcs12 = { path = "third_party/vendor/bergshamra-pkcs12" }
-bergshamra-transforms = { path = "third_party/vendor/bergshamra-transforms" }
-bergshamra-xml = { path = "third_party/vendor/bergshamra-xml" }
-uppsala = { path = "third_party/vendor/uppsala" }
-kryptering = { path = "third_party/vendor/kryptering" }
-tsp-ltv = { path = "third_party/vendor/tsp-ltv" }

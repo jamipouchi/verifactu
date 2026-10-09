@@ -95,14 +95,12 @@ cargo build            # default features: http + signing
 cargo test             # the test lattice
 ```
 
-The `signing` feature rides the vendored
+The `signing` feature rides the
 [bergshamra](https://github.com/kushaldas/bergshamra) XML-security
-family under `third_party/vendor/`, pinned through `[patch.crates-io]`
-in the root `Cargo.toml` so the exact source is committed here.
-Consumers depending on this crate by git URL resolve the family from
-crates.io instead (a dependency's `[patch]` is not inherited); add the
-same `[patch.crates-io]` entries in your root manifest if you want the
-vendored pins.
+family and the uppsala XML parser, both from crates.io pinned at exact
+(`=`) versions. Nothing is vendored: the first build resolves the
+index from the network, and every build after uses your local cargo
+registry cache.
 
 `fixtures/xades/` and
 `contracts/aeat-verifactu/SuministroInformacion.xsd` are test
