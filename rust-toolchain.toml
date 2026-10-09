@@ -1,0 +1,10 @@
+# Toolchain policy (tech-lead, 2026-10-02): ride stable deliberately. The
+# toolchain only moves when someone runs `rustup update` — that IS the bump
+# act, and it happens at wave boundaries with the gates re-run (fmt, clippy
+# -D warnings, the battery), never mid-wave. An exact-version pin is
+# deliberately not used (six-weekly file churn for no added safety here);
+# a future CI plane may pin its own exact version for reproducibility.
+[toolchain]
+channel = "stable"
+profile = "minimal"
+components = ["rustfmt", "clippy"]

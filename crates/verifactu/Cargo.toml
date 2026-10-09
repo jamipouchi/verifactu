@@ -1,0 +1,116 @@
+[package]
+name = "verifactu"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The one-crate facade for sending Veri*FACTU records to AEAT"
+
+[lints]
+workspace = true
+
+[features]
+default = ["http", "signing"]
+# The batteries-included AEAT transport (HTTPS + mTLS over rustls and
+# hyper-util). Consumers that own their egress — edge runtimes riding
+# an mTLS-certificate binding (Cloudflare Workers, WASM) — implement
+# `VerifactuTransport` themselves, pass both legs through
+# `CertificateSource::Custom`, and build with default-features = false
+# so the HTTP stack is not compiled at all.
+http = [
+    "dep:tokio",
+    "dep:rustls",
+    "dep:tokio-rustls",
+    "dep:webpki-roots",
+    "dep:http",
+    "dep:hyper",
+    "dep:hyper-util",
+    "dep:http-body-util",
+    "dep:bytes",
+    "dep:tower-service",
+]
+# XAdES-EPES record signing over the vendored bergshamra family: the
+# `Pkcs12` door and `engine::xades`. Consumers supplying their own
+# signer through `CertificateSource::Custom` (edge runtimes, KMS/HSM)
+# build without it — the signing tree is not compiled at all.
+signing = [
+    "dep:bergshamra-pkcs12",
+    "dep:bergshamra-c14n",
+    "dep:bergshamra-dsig",
+    "dep:bergshamra-keys",
+    "dep:bergshamra-crypto",
+    "dep:uppsala",
+    "dep:x509-cert",
+    "dep:base64",
+]
+# Single-threaded runtimes (wasm32: Cloudflare Workers and other edge
+# hosts): the transport port's boxed future drops its `+ Send` bound,
+# so a runtime fetch (a JS `Promise`, structurally `!Send`) implements
+# the port directly — no spawn/oneshot bridge at the consumer.
+edge = []
+# JSON shapes for the product-facing results (`Emission`, the chain
+# cursors, the sealed kinds, the consulta answers) — Serialize, plus
+# Deserialize for the durable state (cursors, kinds).
+serde = ["dep:serde"]
+# Test tooling (owned-loopback TLS listeners + throwaway CAs) compiled
+# in, never wired in production.
+test-util = ["http", "signing", "dep:rcgen", "dep:axum"]
+
+[dependencies]
+# domain core
+rust_decimal = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+strum = { workspace = true }
+thiserror = { workspace = true }
+# JSON shapes for the product-facing results (feature "serde")
+serde = { workspace = true, optional = true }
+# signing stack — the vendored bergshamra family (see the root table's
+# [patch.crates-io]); bergshamra-pkcs12 is never referenced by name
+# here, but this direct declaration is the only thing enabling its
+# `legacy-algorithms` (default) feature — dropping it silently loses
+# the 3DES/RC2 PKCS#12 ciphers of the FNMT install base. Feature
+# "signing" owns the whole family.
+bergshamra-pkcs12 = { workspace = true, optional = true }
+bergshamra-c14n = { workspace = true, optional = true }
+bergshamra-dsig = { workspace = true, optional = true }
+bergshamra-keys = { workspace = true, optional = true }
+bergshamra-crypto = { workspace = true, optional = true }
+uppsala = { workspace = true, optional = true }
+x509-cert = { workspace = true, optional = true }
+base64 = { workspace = true, optional = true }
+
+# the HTTP leg (feature "http")
+tokio = { workspace = true, optional = true, features = ["time"] }
+rustls = { workspace = true, optional = true }
+tokio-rustls = { workspace = true, optional = true }
+webpki-roots = { workspace = true, optional = true }
+http = { workspace = true, optional = true }
+# ALPN negotiates http/1.1 ONLY: the hyper-util pin builds no h2 leg,
+# and nothing else may be negotiated.
+hyper = { workspace = true, optional = true }
+hyper-util = { workspace = true, optional = true }
+http-body-util = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
+tower-service = { workspace = true, optional = true }
+# test-util only
+rcgen = { workspace = true, optional = true }
+axum = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+insta = { workspace = true }
+serde_json = { workspace = true }
+
+[[test]]
+name = "loopback_tls_workflows"
+required-features = ["test-util"]
+
+[[test]]
+name = "loopback_aeat"
+required-features = ["test-util"]
+
+[[test]]
+name = "enveloped_scenarios"
+required-features = ["signing"]

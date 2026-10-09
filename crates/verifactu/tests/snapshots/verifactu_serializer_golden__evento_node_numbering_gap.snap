@@ -1,0 +1,5 @@
+---
+source: crates/fiscal/tests/verifactu_serializer_golden.rs
+expression: signed_unit.clone()
+---
+<sum1:Evento xmlns:sum1="https://www2.agenciatributaria.gob.es/static_files/common/internet/dep/aplicaciones/es/aeat/tike/cont/ws/SuministroInformacion.xsd"><sum1:ObligadoEmision><sum1:NIF>89890001K</sum1:NIF></sum1:ObligadoEmision><sum1:TipoEvento>DETECCION_ANOMALIAS_FACTURACION</sum1:TipoEvento><sum1:MotivoAnomalia>hueco de numeración: T00000043 consumido no remitido</sum1:MotivoAnomalia><sum1:IdSistemaInformatico>77</sum1:IdSistemaInformatico><sum1:SistemaInformatico><sum1:NIF>89890001K</sum1:NIF><sum1:Version>1.0.03</sum1:Version><sum1:NumeroInstalacion>383</sum1:NumeroInstalacion></sum1:SistemaInformatico><sum1:FechaHoraHusoGenEvento>2025-02-05T08:05:00+01:00</sum1:FechaHoraHusoGenEvento><sum1:TipoHuella>01</sum1:TipoHuella><sum1:HuellaEvento>A54AC5E760834063D3CEBB0337C6A4B3AA3D3020002F5E9C8C442A67B1E0007A</sum1:HuellaEvento><sum1:Encadenamiento><sum1:EventoAnterior><sum1:HuellaEvento>2480D1D3D26ABB3B6EF1BB7860C4474EDD22A65F78D747928ED36A0434B8ECBD</sum1:HuellaEvento></sum1:EventoAnterior></sum1:Encadenamiento></sum1:Evento>
