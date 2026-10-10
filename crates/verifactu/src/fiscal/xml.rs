@@ -1026,7 +1026,7 @@ impl Tree {
 fn is_char_code(code: u32) -> bool {
     matches!(
         code,
-        0x9 | 0xA | 0xD | 0x20..=0xD7FF | 0xE000..=0xFFFD | 0x0010_0000..=0x0010_FFFF
+        0x9 | 0xA | 0xD | 0x20..=0xD7FF | 0xE000..=0xFFFD | 0x1_0000..=0x10_FFFF
     )
 }
 
@@ -1307,7 +1307,7 @@ pub(crate) fn sent_request(envelope: &str) -> Result<SentRequest, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{registro_alta, EmissionContext};
+    use super::{check_text, parse_tree, registro_alta, EmissionContext, Tree};
     use crate::fiscal::tests_support::{iva_super, obligado, primer_alta_record, sif};
 
     /// No live bench leg exercises escaping.
@@ -1329,5 +1329,51 @@ mod tests {
             "escaped bytes must appear verbatim: {node}"
         );
         assert!(!node.contains("<2 uds>"), "raw \'<\' must never appear");
+    }
+
+    fn find<'a>(tree: &'a Tree, local: &str) -> Option<&'a Tree> {
+        if tree.local == local {
+            return Some(tree);
+        }
+        tree.children.iter().find_map(|child| find(child, local))
+    }
+
+    /// `Char` ends at `[#x10000-#x10FFFF]` — the supplementary planes
+    /// (emoji in a client's name) are legal on both edges.
+    #[test]
+    fn supplementary_plane_chars_serialize_and_round_trip() {
+        let descripcion = "Floristería 🌸 \u{1_0000} \u{10_FFFF} \u{FFFD}";
+        assert!(check_text("DescripcionOperacion", descripcion, 500).is_ok());
+        let desglose = [iva_super()];
+        let ctx = EmissionContext {
+            descripcion_operacion: Some(descripcion),
+            desglose: &desglose,
+            ..EmissionContext::default()
+        };
+        let node =
+            registro_alta(&primer_alta_record(), &ctx, &obligado(), &sif()).expect("serializes");
+        let tree = parse_tree(&node).expect("reads back");
+        let read = find(&tree, "DescripcionOperacion").expect("element present");
+        assert_eq!(read.text, descripcion);
+
+        let referenced = parse_tree("<a>&#x1F338;&#128056;&#x10000;&#x10FFFF;</a>")
+            .expect("supplementary references decode");
+        assert_eq!(referenced.text, "🌸🐸\u{1_0000}\u{10_FFFF}");
+    }
+
+    #[test]
+    fn non_chars_still_refuse_on_both_edges() {
+        for code in (0x0..=0x8).chain([0xB, 0xC, 0x1F, 0xFFFE, 0xFFFF]) {
+            let ch = char::from_u32(code).expect("scalar value");
+            assert!(
+                check_text("DescripcionOperacion", &format!("a{ch}b"), 500).is_err(),
+                "U+{code:04X} must refuse on write"
+            );
+            assert!(
+                parse_tree(&format!("<a>&#x{code:X};</a>")).is_err(),
+                "&#x{code:X}; must refuse on read"
+            );
+        }
+        assert!(parse_tree("<a>&#x110000;</a>").is_err());
     }
 }
