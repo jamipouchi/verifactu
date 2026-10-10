@@ -26,22 +26,25 @@ impl RecordedRequest {
         Self {
             method: req.method().as_str().to_owned(),
             uri: req.uri().to_string(),
-            headers: req
-                .headers()
-                .iter()
-                .map(|(name, value)| {
-                    (
-                        name.as_str().to_owned(),
-                        value
-                            .to_str()
-                            .unwrap_or("<non-ascii value bytes>")
-                            .to_owned(),
-                    )
-                })
-                .collect(),
+            headers: headers_of(req.headers()),
             body: req.body().clone(),
         }
     }
+}
+
+fn headers_of(headers: &http::HeaderMap) -> Vec<(String, String)> {
+    headers
+        .iter()
+        .map(|(name, value)| {
+            (
+                name.as_str().to_owned(),
+                value
+                    .to_str()
+                    .unwrap_or("<non-ascii value bytes>")
+                    .to_owned(),
+            )
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -59,19 +62,7 @@ impl RecordedResponse {
         match outcome {
             Ok(response) => Self::Answer {
                 status: response.status().as_u16(),
-                headers: response
-                    .headers()
-                    .iter()
-                    .map(|(name, value)| {
-                        (
-                            name.as_str().to_owned(),
-                            value
-                                .to_str()
-                                .unwrap_or("<non-ascii value bytes>")
-                                .to_owned(),
-                        )
-                    })
-                    .collect(),
+                headers: headers_of(response.headers()),
                 body: response.body().clone(),
             },
             Err(error) => Self::TransportError(error.to_string()),

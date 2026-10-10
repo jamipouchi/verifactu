@@ -6,8 +6,6 @@ mod client;
 mod recorder;
 
 pub use client::HttpWireClient;
-// Re-exported: the builders' public signatures name rustls types, so
-// consumers must share this pinned version.
 pub use recorder::{RecordedExchange, RecordedRequest, RecordedResponse, Recorder};
 
 #[cfg(feature = "test-util")]

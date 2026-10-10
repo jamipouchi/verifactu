@@ -30,8 +30,9 @@ http = [
     "dep:bytes",
     "dep:tower-service",
 ]
-# XAdES-EPES record signing over the vendored bergshamra family: the
-# `Pkcs12` door and `engine::xades`. Consumers supplying their own
+# XAdES-EPES record signing over the bergshamra family: the `Pkcs12`
+# door and the `engine` signing surface (`XadesSigner`, `enveloped`,
+# `verify`). Consumers supplying their own
 # signer through `CertificateSource::Custom` (edge runtimes, KMS/HSM)
 # build without it — the signing tree is not compiled at all.
 signing = [
@@ -66,9 +67,8 @@ strum = { workspace = true }
 thiserror = { workspace = true }
 # JSON shapes for the product-facing results (feature "serde")
 serde = { workspace = true, optional = true }
-# signing stack — the vendored bergshamra family (see the root table's
-# [patch.crates-io]); bergshamra-pkcs12 is never referenced by name
-# here, but this direct declaration is the only thing enabling its
+# signing stack — the bergshamra family at exact pins (root table).
+# bergshamra-pkcs12's direct declaration is what enables its
 # `legacy-algorithms` (default) feature — dropping it silently loses
 # the 3DES/RC2 PKCS#12 ciphers of the FNMT install base. Feature
 # "signing" owns the whole family.
@@ -102,6 +102,10 @@ axum = { workspace = true, optional = true }
 tokio = { workspace = true }
 insta = { workspace = true }
 serde_json = { workspace = true }
+proptest = { workspace = true }
+# The independent oracles: a conformant XML 1.0 parser and XSD
+# validator the serializer's laws are tested against.
+uppsala = { workspace = true }
 
 [[test]]
 name = "loopback_tls_workflows"

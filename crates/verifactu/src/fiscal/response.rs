@@ -110,8 +110,8 @@ pub struct RespuestaSuministro {
     /// Present only when the envío was not rejected — not re-fetchable
     /// later.
     pub csv: Option<String>,
-    /// AEAT's backpressure (seconds) — distinct from the outbox's own
-    /// backoff.
+    /// AEAT's mandated wait (seconds) before the next envío — distinct
+    /// from any retry backoff of the caller's own.
     pub tiempo_espera_envio: u64,
     pub estado_envio: EstadoEnvio,
     pub lineas: Vec<RespuestaLinea>,
@@ -135,32 +135,17 @@ impl SoapFault {
     }
 }
 
-// One law for the four decoders: the spec-owned bytes live only in the
-// `as_str` arms; parsing is the reverse lookup, so the read edge can
-// never re-spell the vocabulary.
-
-fn estado_envio_of(text: &str) -> Result<EstadoEnvio, String> {
-    EstadoEnvio::iter()
-        .find(|&estado| estado.as_str() == text)
-        .ok_or_else(|| format!("unknown EstadoEnvio {text:?}"))
-}
-
-fn estado_registro_of(text: &str) -> Result<EstadoRegistro, String> {
-    EstadoRegistro::iter()
-        .find(|&estado| estado.as_str() == text)
-        .ok_or_else(|| format!("unknown EstadoRegistro {text:?}"))
-}
-
-fn estado_duplicado_of(text: &str) -> Result<EstadoDuplicado, String> {
-    EstadoDuplicado::iter()
-        .find(|&estado| estado.as_str() == text)
-        .ok_or_else(|| format!("unknown EstadoRegistroDuplicado {text:?}"))
-}
-
-fn tipo_operacion_of(text: &str) -> Result<TipoOperacion, String> {
-    TipoOperacion::iter()
-        .find(|&tipo| tipo.as_str() == text)
-        .ok_or_else(|| format!("unknown TipoOperacion {text:?}"))
+/// One law for the read edge's decoders: the spec-owned bytes live only
+/// in the `as_str` arms; parsing is the reverse lookup, so the read edge
+/// can never re-spell the vocabulary.
+fn vocabulary<E: IntoEnumIterator + Copy>(
+    element: &str,
+    text: &str,
+    as_str: fn(E) -> &'static str,
+) -> Result<E, String> {
+    E::iter()
+        .find(|&variant| as_str(variant) == text)
+        .ok_or_else(|| format!("unknown {element} {text:?}"))
 }
 
 /// A non-numeric code is propagated, never degraded to `None` — the
@@ -202,7 +187,11 @@ pub(crate) fn respuesta_of_tree(root: &Tree) -> Result<RespuestaSuministro, Stri
             .parse::<u64>()
             .map_err(|_| String::from("TiempoEsperaEnvio is not numeric"))?,
     };
-    let estado_envio = estado_envio_of(&root.child_text("EstadoEnvio").ok_or("no EstadoEnvio")?)?;
+    let estado_envio = vocabulary(
+        "EstadoEnvio",
+        &root.child_text("EstadoEnvio").ok_or("no EstadoEnvio")?,
+        EstadoEnvio::as_str,
+    )?;
     let mut lineas = Vec::new();
     for linea in root
         .children
@@ -210,17 +199,21 @@ pub(crate) fn respuesta_of_tree(root: &Tree) -> Result<RespuestaSuministro, Stri
         .filter(|node| node.local == "RespuestaLinea")
     {
         let id_factura = linea.child("IDFactura").ok_or("linea without IDFactura")?;
-        let tipo_operacion = tipo_operacion_of(
+        let tipo_operacion = vocabulary(
+            "TipoOperacion",
             &linea
                 .child("Operacion")
                 .and_then(|op| op.child_text("TipoOperacion"))
                 .ok_or("linea without TipoOperacion")?,
+            TipoOperacion::as_str,
         )?;
         let duplicado = match linea.child("RegistroDuplicado") {
             Some(dup) => {
-                let estado_duplicado = estado_duplicado_of(
+                let estado_duplicado = vocabulary(
+                    "EstadoRegistroDuplicado",
                     &dup.child_text("EstadoRegistroDuplicado")
                         .ok_or("RegistroDuplicado without EstadoRegistroDuplicado")?,
+                    EstadoDuplicado::as_str,
                 )?;
                 Some(RegistroDuplicado {
                     id_peticion: dup
@@ -245,10 +238,12 @@ pub(crate) fn respuesta_of_tree(root: &Tree) -> Result<RespuestaSuministro, Stri
                 .ok_or("IDFactura without FechaExpedicionFactura")?,
             tipo_operacion,
             ref_externa: linea.child_text("RefExterna"),
-            estado_registro: estado_registro_of(
+            estado_registro: vocabulary(
+                "EstadoRegistro",
                 &linea
                     .child_text("EstadoRegistro")
                     .ok_or("linea without EstadoRegistro")?,
+                EstadoRegistro::as_str,
             )?,
             codigo_error_registro: codigo_error_of(linea.child_text("CodigoErrorRegistro"))?,
             descripcion_error_registro: linea.child_text("DescripcionErrorRegistro"),
@@ -263,20 +258,7 @@ pub(crate) fn respuesta_of_tree(root: &Tree) -> Result<RespuestaSuministro, Stri
     })
 }
 
-pub(crate) fn parse_fault(xml: &str) -> Result<SoapFault, String> {
-    let root = parse_tree(xml)?;
-    // A bare `Fault` root (defensive) or the enveloped wire shape.
-    let fault = if root.local == "Fault" {
-        &root
-    } else {
-        root.child("Body")
-            .and_then(|body| body.child("Fault"))
-            .ok_or("no soap Fault in the document")?
-    };
-    fault_of_tree(fault)
-}
-
-/// [`parse_fault`]'s tree half, shared with the envelope read edge.
+/// One `soapenv:Fault`'s code and string.
 pub(crate) fn fault_of_tree(fault: &Tree) -> Result<SoapFault, String> {
     Ok(SoapFault {
         code: fault

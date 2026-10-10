@@ -3,7 +3,8 @@
 //! it never rides the payload.
 //!
 //! `SOAPAction` stays ABSENT: the WSDL's binding declares
-//! `soapAction=""`, and the live sweep accepted it absent.
+//! `soapAction=""` (`contracts/aeat-verifactu/SistemaFacturacion.wsdl`),
+//! and AEAT pruebas accepts it absent.
 
 pub mod p12;
 

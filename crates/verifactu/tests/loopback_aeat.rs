@@ -69,6 +69,7 @@ fn envelope_for_primer_alta() -> String {
     let node = xml::record_node(&record, &ctx, &obligado, &sif).expect("serializes");
     let body = xml::reg_factu_document(
         &obligado,
+        None,
         &CabeceraRemision::Voluntaria { incidencia: false },
         &[node],
     )

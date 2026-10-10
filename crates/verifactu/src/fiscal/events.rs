@@ -1,57 +1,37 @@
 //! Event records: the `TipoEvento` vocabulary AS DATA and the event
-//! constructors. The vocabulary is NOT public law — it is the incumbent
-//! L1E set recovered from a decompile, kept as a const list and enforced
-//! at the emit boundary. INTERPRETATION: the vocabulary names; the
-//! numbering-gap decision (a consumed-but-uncommitted number IS an
-//! integrity anomaly); the motivo's `MotivoAnomalia` rendering.
+//! constructors. AEAT publishes no event XSD, so the vocabulary is an
+//! INTERPRETATION kept as a closed list and enforced at the emit
+//! boundary — as are the numbering-gap decision (a
+//! consumed-but-uncommitted number IS an integrity anomaly) and the
+//! motivo's `MotivoAnomalia` rendering.
 
 use crate::domain::chain::EventData;
 
-pub(crate) const TIPOS_EVENTO: [(&str, &str); 11] = [
-    (
-        "INICIO_NO_VERIFACTU",
-        "la instalación empieza a operar en modalidad no VERI*FACTU",
-    ),
-    (
-        "FIN_NO_VERIFACTU",
-        "la instalación deja de operar en modalidad no VERI*FACTU",
-    ),
-    (
-        "LANZAMIENTO_DETECCION_ANOMALIAS_FACTURACION",
-        "se lanza la detección de anomalías de facturación",
-    ),
-    (
-        "DETECCION_ANOMALIAS_FACTURACION",
-        "se detecta una anomalía de facturación (p. ej. hueco de numeración)",
-    ),
-    (
-        "LANZAMIENTO_DETECCION_ANOMALIAS_EVENTO",
-        "se lanza la detección de anomalías de eventos",
-    ),
-    (
-        "DETECCION_ANOMALIAS_EVENTO",
-        "se detecta una anomalía de eventos",
-    ),
-    (
-        "RESTAURACION_COPIA_SEGURIDAD",
-        "se restaura desde una copia de seguridad",
-    ),
-    (
-        "EXPORTACION_REGISTROS_FACTURACION",
-        "se exportan registros de facturación",
-    ),
-    (
-        "EXPORTACION_REGISTROS_EVENTO",
-        "se exportan registros de eventos",
-    ),
-    ("REGISTRO_RESUMEN_EVENTOS", "resumen periódico de eventos"),
-    ("OTROS_EVENTOS_VOLUNTARIOS", "otros eventos voluntarios"),
+const TIPOS_EVENTO: [&str; 11] = [
+    // la instalación empieza / deja de operar en modalidad no VERI*FACTU
+    "INICIO_NO_VERIFACTU",
+    "FIN_NO_VERIFACTU",
+    // se lanza / se detecta (p. ej. un hueco de numeración) la detección
+    // de anomalías de facturación
+    "LANZAMIENTO_DETECCION_ANOMALIAS_FACTURACION",
+    DETECCION_ANOMALIAS_FACTURACION,
+    // ...y de anomalías de eventos
+    "LANZAMIENTO_DETECCION_ANOMALIAS_EVENTO",
+    "DETECCION_ANOMALIAS_EVENTO",
+    // se restaura desde una copia de seguridad
+    RESTAURACION_COPIA_SEGURIDAD,
+    // se exportan registros de facturación / de eventos
+    "EXPORTACION_REGISTROS_FACTURACION",
+    "EXPORTACION_REGISTROS_EVENTO",
+    // resumen periódico de eventos; otros eventos voluntarios
+    "REGISTRO_RESUMEN_EVENTOS",
+    "OTROS_EVENTOS_VOLUNTARIOS",
 ];
 
-pub(crate) const RESTAURACION_COPIA_SEGURIDAD: &str = "RESTAURACION_COPIA_SEGURIDAD";
+const RESTAURACION_COPIA_SEGURIDAD: &str = "RESTAURACION_COPIA_SEGURIDAD";
 
 /// A consumed-but-uncommitted number IS an integrity anomaly (decided).
-pub(crate) const DETECCION_ANOMALIAS_FACTURACION: &str = "DETECCION_ANOMALIAS_FACTURACION";
+const DETECCION_ANOMALIAS_FACTURACION: &str = "DETECCION_ANOMALIAS_FACTURACION";
 
 /// The hashed subset of the emitter-level `SistemaInformaticoConfig`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -96,5 +76,5 @@ pub fn evento_numbering_gap(sif: &EventoSif, nif_obligado: &str) -> EventData {
 /// enter the event chain.
 #[must_use]
 pub(crate) fn is_known_tipo_evento(tipo: &str) -> bool {
-    TIPOS_EVENTO.iter().any(|(code, _)| *code == tipo)
+    TIPOS_EVENTO.contains(&tipo)
 }

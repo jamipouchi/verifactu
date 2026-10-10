@@ -20,13 +20,9 @@ impl<'de> serde::Deserialize<'de> for Money {
         // The trait call spelled fully: `Decimal` carries an INHERENT
         // `deserialize([u8; 16])` (bincode-style) that shadows it.
         let value = <Decimal as serde::Deserialize>::deserialize(deserializer)?;
-        if value.scale() <= 2 {
-            Ok(Money(value))
-        } else {
-            Err(serde::de::Error::custom(format!(
-                "money carries more than 2 decimal places: {value}"
-            )))
-        }
+        Money::try_from_decimal(value).ok_or_else(|| {
+            serde::de::Error::custom(format!("money carries more than 2 decimal places: {value}"))
+        })
     }
 }
 
@@ -56,16 +52,21 @@ impl Money {
         i64::try_from(cents).expect("ImporteSgn12.2 × 100 fits i64 cents")
     }
 
+    /// The checked door for decimals from outside: `None` when `value`
+    /// carries more than 2 decimal places (money never rounds silently).
+    #[must_use]
+    pub fn try_from_decimal(value: Decimal) -> Option<Money> {
+        (value.scale() <= 2).then_some(Money(value))
+    }
+
     /// # Panics
     ///
-    /// Panics when `value` carries more than 2 decimal places.
+    /// Panics when `value` carries more than 2 decimal places —
+    /// [`Money::try_from_decimal`] is the non-panicking door.
     #[must_use]
     pub fn from_decimal(value: Decimal) -> Money {
-        assert!(
-            value.scale() <= 2,
-            "money carries more than 2 decimal places: {value}"
-        );
-        Money(value)
+        Money::try_from_decimal(value)
+            .unwrap_or_else(|| panic!("money carries more than 2 decimal places: {value}"))
     }
 
     #[must_use]

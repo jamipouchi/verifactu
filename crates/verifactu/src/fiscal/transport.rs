@@ -8,12 +8,16 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Mutex;
 
+use crate::fiscal::consulta::{
+    consulta_of_tree, consulta_response_document, ConsultaSpec, Mes, ResultadoConsulta,
+};
 use crate::fiscal::response::{
-    parse_fault, parse_respuesta, EstadoDuplicado, EstadoEnvio, EstadoRegistro,
+    fault_of_tree, respuesta_of_tree, EstadoDuplicado, EstadoEnvio, EstadoRegistro,
     RespuestaSuministro, SoapFault, TipoOperacion,
 };
 use crate::fiscal::xml::{
-    sent_request, tag, SentRecord, NS_RESPUESTA, NS_SOAP_ENV, NS_SUMINISTRO, P_ENV, P_RS,
+    parse_tree, sent_request, tag, SentRecord, Tree, NS_RESPUESTA, NS_SOAP_ENV, NS_SUMINISTRO,
+    P_ENV, P_RS,
 };
 
 #[derive(Debug)]
@@ -26,7 +30,8 @@ pub enum TransportOutcome {
     Fault(SoapFault),
 }
 
-/// Always the `Transient` class: the outbox retries.
+/// The wire leg failed (unreachable, timeout, refused, unparseable
+/// answer) — always the `Transient` class: the caller retries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransportFailure {
     pub detail: String,
@@ -49,60 +54,44 @@ pub trait VerifactuTransport: Send + Sync {
     fn send<'a>(&'a self, soap_envelope: &'a str) -> SendFuture<'a>;
 }
 
-/// The production wire's read edge: `Body/Fault` (any HTTP status) or
-/// `Body/RespuestaRegFactuSistemaFacturacion`; the fake's bare-root
-/// documents parse through the same edge — one read law, offline and
-/// live.
+/// The production wire's read edge: a SOAP envelope whose `Body`
+/// carries a `Fault` (any HTTP status) or either respuesta, or that
+/// payload as a bare root — the fake's documents parse through this same
+/// edge, so one read law holds offline and live.
 ///
 /// # Errors
-/// A prose `Err` when the document carries neither shape — the
+/// A prose `Err` when the document carries none of those shapes — the
 /// `Transient` class: an unparseable answer is surfaced, never guessed
 /// at.
 pub fn parse_soap_answer(xml: &str) -> Result<TransportOutcome, String> {
-    let root = crate::fiscal::xml::parse_tree(xml)?;
-    let body = if root.local == "Envelope" {
-        Some(root.child("Body").ok_or("SOAP envelope without Body")?)
-    } else {
-        None
-    };
-    let fault = if root.local == "Fault" {
-        Some(&root)
-    } else {
-        body.and_then(|body| body.child("Fault"))
-    };
-    if let Some(fault) = fault {
-        return Ok(TransportOutcome::Fault(
-            crate::fiscal::response::fault_of_tree(fault)?,
-        ));
-    }
-    let payload = if let Some(body) = body {
-        body.children
+    const PAYLOADS: [&str; 3] = [
+        "Fault",
+        "RespuestaRegFactuSistemaFacturacion",
+        "RespuestaConsultaFactuSistemaFacturacion",
+    ];
+    let root = parse_tree(xml)?;
+    let payload = if root.local == "Envelope" {
+        root.child("Body")
+            .ok_or("SOAP envelope without Body")?
+            .children
             .iter()
-            .find(|node| {
-                node.local == "RespuestaRegFactuSistemaFacturacion"
-                    || node.local == "RespuestaConsultaFactuSistemaFacturacion"
-            })
-            .ok_or("SOAP Body carries neither RespuestaRegFactuSistemaFacturacion nor RespuestaConsultaFactuSistemaFacturacion")?
-    } else if root.local == "RespuestaRegFactuSistemaFacturacion" {
-        &root
-    } else if root.local == "RespuestaConsultaFactuSistemaFacturacion" {
-        return Ok(TransportOutcome::Consulta(
-            crate::fiscal::consulta::consulta_of_tree(&root)?,
-        ));
+            .find(|node| PAYLOADS.contains(&node.local.as_str()))
+            .ok_or("SOAP Body carries neither a Fault nor a respuesta")?
     } else {
-        return Err(format!(
-            "root element is {}, not a SOAP envelope, Fault, or either respuesta",
-            root.local
-        ));
+        &root
     };
-    if payload.local == "RespuestaConsultaFactuSistemaFacturacion" {
-        return Ok(TransportOutcome::Consulta(
-            crate::fiscal::consulta::consulta_of_tree(payload)?,
-        ));
+    match payload.local.as_str() {
+        "Fault" => Ok(TransportOutcome::Fault(fault_of_tree(payload)?)),
+        "RespuestaRegFactuSistemaFacturacion" => {
+            Ok(TransportOutcome::Response(respuesta_of_tree(payload)?))
+        }
+        "RespuestaConsultaFactuSistemaFacturacion" => {
+            Ok(TransportOutcome::Consulta(consulta_of_tree(payload)?))
+        }
+        other => Err(format!(
+            "root element is {other}, not a SOAP envelope, Fault, or either respuesta"
+        )),
     }
-    Ok(TransportOutcome::Response(
-        crate::fiscal::response::respuesta_of_tree(payload)?,
-    ))
 }
 
 #[derive(Debug, Clone)]
@@ -122,8 +111,7 @@ pub enum ScriptedOutcome {
     /// The wholesale envío-level rejection: `EstadoEnvio=Incorrecto`
     /// with ZERO `RespuestaLinea` blocks — no per-line echo is
     /// fabricated (`Lineas` pads short scripts with `Correcto`, so this
-    /// shape needs its own variant; an outbox suite scripts it as the
-    /// regulatory-surface path).
+    /// shape needs its own variant).
     EnvioIncorrecto {
         tiempo_espera_envio: u32,
     },
@@ -285,12 +273,14 @@ pub fn fault_document(faultcode: &str, faultstring: &str) -> String {
     out
 }
 
-/// A dry script answers a plain `Correcto`.
+/// Answers every envío through the real read edge: a dry submission
+/// script answers a plain `Correcto` echo of the records sent, a dry
+/// consulta script answers `SinDatos`.
 #[derive(Debug, Default)]
 pub struct FakeVerifactuTransport {
     sent: Mutex<Vec<String>>,
     script: Mutex<VecDeque<ScriptedOutcome>>,
-    consulta_script: Mutex<VecDeque<crate::fiscal::consulta::ConsultaSpec>>,
+    consulta_script: Mutex<VecDeque<ConsultaSpec>>,
 }
 
 impl FakeVerifactuTransport {
@@ -311,38 +301,15 @@ impl FakeVerifactuTransport {
     }
 
     /// The consulta half's script: every sent consulta envelope answers
-    /// the next spec (a dry script answers `SinDatos`) — rendered and
-    /// re-parsed through the real read edge, like the submission half.
+    /// the next spec.
     ///
     /// # Panics
     /// If the script lock is poisoned.
-    pub fn push_consulta(&self, spec: crate::fiscal::consulta::ConsultaSpec) {
+    pub fn push_consulta(&self, spec: ConsultaSpec) {
         self.consulta_script
             .lock()
             .expect("fake transport script lock")
             .push_back(spec);
-    }
-
-    fn consulta_answer(spec: &crate::fiscal::consulta::ConsultaSpec) -> TransportOutcome {
-        let doc = crate::fiscal::consulta::consulta_response_document(spec);
-        TransportOutcome::Consulta(
-            crate::fiscal::consulta::parse_consulta(&doc)
-                .expect("the consulta document the fake built must parse (bug if not)"),
-        )
-    }
-
-    fn dry_consulta_answer() -> TransportOutcome {
-        Self::consulta_answer(&crate::fiscal::consulta::ConsultaSpec {
-            obligado_nombre: String::new(),
-            obligado_nif: String::new(),
-            apoderado: false,
-            ejercicio: 1970,
-            mes: crate::fiscal::consulta::Mes::try_new(1).expect("enero"),
-            resultado: crate::fiscal::consulta::ResultadoConsulta::SinDatos,
-            paginacion_pendiente: false,
-            clave_paginacion: None,
-            registros: Vec::new(),
-        })
     }
 
     /// # Panics
@@ -357,6 +324,14 @@ impl FakeVerifactuTransport {
     #[must_use]
     pub fn send_count(&self) -> usize {
         self.sent.lock().expect("fake transport state lock").len()
+    }
+
+    /// Every scripted document parses back through
+    /// [`parse_soap_answer`] — the fake never drifts from the real read
+    /// edge.
+    fn read_back(document: &str) -> TransportOutcome {
+        parse_soap_answer(document)
+            .expect("the document the fake built parses through the real read edge (bug if not)")
     }
 
     fn line_for(scripted: &ScriptedLine, record: &SentRecord) -> LineaSpec {
@@ -401,8 +376,7 @@ impl FakeVerifactuTransport {
             num_serie: record.num_serie.clone(),
             fecha: record.fecha.clone(),
             tipo_operacion: record.tipo_operacion,
-            // The echo answers the record's own RefExterna back — real
-            // AEAT does (RS.xsd echoes it), so the fake must too.
+            // Real AEAT echoes the record's own RefExterna (RS.xsd).
             ref_externa: record.ref_externa.clone(),
             estado_registro: estado,
             codigo_error: codigo,
@@ -411,99 +385,138 @@ impl FakeVerifactuTransport {
         }
     }
 
-    /// Pads with `Correcto` when the script runs short — the echo must
-    /// cover every record.
-    fn response_document_for(
+    /// The respuesta echoing every record `soap_envelope` carried: one
+    /// line per record, the script's lines first and `Correcto` padding
+    /// the rest — or, for a wholesale rejection (`lineas: None`), no
+    /// lines at all.
+    fn respuesta_for(
         soap_envelope: &str,
         csv: Option<&str>,
         tiempo_espera_envio: u32,
         estado_envio: EstadoEnvio,
-        lineas: &[ScriptedLine],
-    ) -> Result<String, TransportFailure> {
-        let request = sent_request(soap_envelope).map_err(|detail| TransportFailure {
-            detail: format!("fake transport could not parse the sent envelope: {detail}"),
-        })?;
-        // Over-scripting is a test bug: `zip` would silently drop the
-        // surplus.
-        debug_assert!(
-            lineas.len() <= request.records.len(),
-            "fake transport scripted {} line outcomes for {} sent records — over-scripted",
-            lineas.len(),
-            request.records.len()
-        );
-        let padded = lineas
-            .iter()
-            .chain(std::iter::repeat(&ScriptedLine::Correcto));
-        let spec = RespuestaSpec {
-            obligado_nombre: &request.obligado_nombre,
-            obligado_nif: &request.obligado_nif,
-            csv,
-            tiempo_espera_envio,
-            estado_envio,
-            lineas: request
+        lineas: Option<&[ScriptedLine]>,
+    ) -> TransportOutcome {
+        let request = sent_request(soap_envelope)
+            .expect("the fake parses the submission envelope it was sent (bug if not)");
+        let lineas = lineas.map_or_else(Vec::new, |lineas| {
+            // Over-scripting is a test bug: `zip` would silently drop
+            // the surplus.
+            assert!(
+                lineas.len() <= request.records.len(),
+                "fake transport scripted {} line outcomes for {} sent records",
+                lineas.len(),
+                request.records.len()
+            );
+            let padded = lineas
+                .iter()
+                .chain(std::iter::repeat(&ScriptedLine::Correcto));
+            request
                 .records
                 .iter()
                 .zip(padded)
                 .map(|(record, scripted)| Self::line_for(scripted, record))
-                .collect(),
-        };
-        Ok(respuesta_document(&spec))
-    }
-
-    /// Parsed back through the real read path — the fake never drifts
-    /// from it.
-    fn fault_answer(code: &str, faultstring: &str) -> TransportOutcome {
-        let doc = fault_document(code, faultstring);
-        TransportOutcome::Fault(
-            parse_fault(&doc).expect("the fault document the fake built must parse (bug if not)"),
-        )
-    }
-
-    fn response_answer(
-        soap_envelope: &str,
-        csv: Option<&str>,
-        tiempo_espera_envio: u32,
-        estado_envio: EstadoEnvio,
-        lineas: &[ScriptedLine],
-    ) -> TransportOutcome {
-        let doc = Self::response_document_for(
-            soap_envelope,
+                .collect()
+        });
+        Self::read_back(&respuesta_document(&RespuestaSpec {
+            obligado_nombre: &request.obligado_nombre,
+            obligado_nif: &request.obligado_nif,
             csv,
             tiempo_espera_envio,
             estado_envio,
             lineas,
-        )
-        .expect("the document builds from our own envelope");
-        TransportOutcome::Response(
-            parse_respuesta(&doc)
-                .expect("the response document the fake built must parse (bug if not)"),
-        )
+        }))
     }
 
-    /// The wholesale envío-level rejection document: `EstadoEnvio=
-    /// Incorrecto`, ZERO `RespuestaLinea` blocks (the obligado is still
-    /// parsed so the document stays RS.xsd-shaped). Deliberately NOT
-    /// `response_answer` — that helper pads short scripts with
-    /// `Correcto` lines, and this shape must carry none.
-    fn envio_incorrecto_answer(
-        soap_envelope: &str,
-        tiempo_espera_envio: u32,
-    ) -> Result<TransportOutcome, TransportFailure> {
-        let request = sent_request(soap_envelope).map_err(|detail| TransportFailure {
-            detail: format!("fake transport could not parse the sent envelope: {detail}"),
-        })?;
-        let spec = RespuestaSpec {
-            obligado_nombre: &request.obligado_nombre,
-            obligado_nif: &request.obligado_nif,
-            csv: None,
-            tiempo_espera_envio,
-            estado_envio: EstadoEnvio::Incorrecto,
-            lineas: Vec::new(),
-        };
-        let doc = respuesta_document(&spec);
-        Ok(TransportOutcome::Response(parse_respuesta(&doc).expect(
-            "the response document the fake built must parse (bug if not)",
-        )))
+    /// The next scripted consulta page — or, on a dry script, a
+    /// `SinDatos` page echoing the request's own cabecera and period.
+    fn consulta_answer(&self, request: &Tree) -> TransportOutcome {
+        let scripted = self
+            .consulta_script
+            .lock()
+            .expect("fake transport script lock")
+            .pop_front();
+        let spec = scripted.unwrap_or_else(|| {
+            let text = |path: &[&str]| {
+                path.iter()
+                    .try_fold(request, |node, local| node.child(local))
+                    .map(|node| node.text.clone())
+                    .unwrap_or_default()
+            };
+            ConsultaSpec {
+                obligado_nombre: text(&["Cabecera", "ObligadoEmision", "NombreRazon"]),
+                obligado_nif: text(&["Cabecera", "ObligadoEmision", "NIF"]),
+                apoderado: text(&["Cabecera", "IndicadorRepresentante"]) == "S",
+                ejercicio: text(&["FiltroConsulta", "PeriodoImputacion", "Ejercicio"])
+                    .parse()
+                    .unwrap_or_default(),
+                mes: text(&["FiltroConsulta", "PeriodoImputacion", "Periodo"])
+                    .parse()
+                    .ok()
+                    .and_then(|mes| Mes::try_new(mes).ok())
+                    .unwrap_or(Mes::ENERO),
+                resultado: ResultadoConsulta::SinDatos,
+                paginacion_pendiente: false,
+                clave_paginacion: None,
+                registros: Vec::new(),
+            }
+        });
+        Self::read_back(&consulta_response_document(&spec))
+    }
+
+    fn submission_answer(&self, soap_envelope: &str) -> Result<TransportOutcome, TransportFailure> {
+        let outcome = self
+            .script
+            .lock()
+            .expect("fake transport script lock")
+            .pop_front()
+            .unwrap_or(ScriptedOutcome::Correcto {
+                csv: None,
+                tiempo_espera_envio: 60,
+            });
+        Ok(match outcome {
+            ScriptedOutcome::Unreachable => {
+                return Err(TransportFailure {
+                    detail: String::from("fake transport: scripted unreachable"),
+                })
+            }
+            ScriptedOutcome::FaultServer(string) => {
+                Self::read_back(&fault_document("soapenv:Server", &string))
+            }
+            ScriptedOutcome::FaultClient(string) => {
+                Self::read_back(&fault_document("soapenv:Client", &string))
+            }
+            ScriptedOutcome::Correcto {
+                csv,
+                tiempo_espera_envio,
+            } => Self::respuesta_for(
+                soap_envelope,
+                csv.as_deref(),
+                tiempo_espera_envio,
+                EstadoEnvio::Correcto,
+                Some(&[]),
+            ),
+            ScriptedOutcome::Lineas {
+                csv,
+                tiempo_espera_envio,
+                estado_envio,
+                lineas,
+            } => Self::respuesta_for(
+                soap_envelope,
+                csv.as_deref(),
+                tiempo_espera_envio,
+                estado_envio,
+                Some(&lineas),
+            ),
+            ScriptedOutcome::EnvioIncorrecto {
+                tiempo_espera_envio,
+            } => Self::respuesta_for(
+                soap_envelope,
+                None,
+                tiempo_espera_envio,
+                EstadoEnvio::Incorrecto,
+                None,
+            ),
+        })
     }
 }
 
@@ -514,79 +527,16 @@ impl VerifactuTransport for FakeVerifactuTransport {
             .lock()
             .expect("fake transport state lock")
             .push(soap_envelope.to_owned());
-        // Consulta envelopes answer the consulta script; the submission
-        // echo below is submission-shaped and would refuse them. Route
-        // on the PARSED payload's name — a submission envelope may
+        // Route on the PARSED payload's name — a submission envelope may
         // legally carry that literal string inside user text.
-        let is_consulta = crate::fiscal::xml::parse_tree(soap_envelope)
-            .ok()
-            .and_then(|root| {
-                root.child("Body").map(|body| {
-                    body.children
-                        .iter()
-                        .any(|node| node.local == "ConsultaFactuSistemaFacturacion")
-                })
-            })
-            .unwrap_or(false);
-        let answer = if is_consulta {
-            let spec = self
-                .consulta_script
-                .lock()
-                .expect("fake transport script lock")
-                .pop_front();
-            match spec {
-                Some(spec) => Ok(Self::consulta_answer(&spec)),
-                None => Ok(Self::dry_consulta_answer()),
-            }
-        } else {
-            let outcome = self
-                .script
-                .lock()
-                .expect("fake transport script lock")
-                .pop_front()
-                .unwrap_or(ScriptedOutcome::Correcto {
-                    csv: None,
-                    tiempo_espera_envio: 60,
-                });
-            match outcome {
-                ScriptedOutcome::Unreachable => Err(TransportFailure {
-                    detail: String::from("fake transport: scripted unreachable"),
-                }),
-                ScriptedOutcome::FaultServer(string) => {
-                    Ok(Self::fault_answer("soapenv:Server", &string))
-                }
-                ScriptedOutcome::FaultClient(string) => {
-                    Ok(Self::fault_answer("soapenv:Client", &string))
-                }
-                ScriptedOutcome::Correcto {
-                    csv,
-                    tiempo_espera_envio,
-                } => Ok(Self::response_answer(
-                    soap_envelope,
-                    csv.as_deref(),
-                    tiempo_espera_envio,
-                    EstadoEnvio::Correcto,
-                    &[],
-                )),
-                ScriptedOutcome::Lineas {
-                    csv,
-                    tiempo_espera_envio,
-                    estado_envio,
-                    lineas,
-                } => Ok(Self::response_answer(
-                    soap_envelope,
-                    csv.as_deref(),
-                    tiempo_espera_envio,
-                    estado_envio,
-                    &lineas,
-                )),
-                ScriptedOutcome::EnvioIncorrecto {
-                    tiempo_espera_envio,
-                } => Ok(
-                    Self::envio_incorrecto_answer(soap_envelope, tiempo_espera_envio)
-                        .expect("the wholesale-rejection document builds from our own envelope"),
-                ),
-            }
+        let root = parse_tree(soap_envelope).ok();
+        let consulta = root
+            .as_ref()
+            .and_then(|root| root.child("Body"))
+            .and_then(|body| body.child("ConsultaFactuSistemaFacturacion"));
+        let answer = match consulta {
+            Some(request) => Ok(self.consulta_answer(request)),
+            None => self.submission_answer(soap_envelope),
         };
         Box::pin(std::future::ready(answer))
     }

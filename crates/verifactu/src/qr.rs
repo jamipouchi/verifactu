@@ -2,8 +2,8 @@
 //! answers — pure data over what an emission already holds, no side
 //! effects, no network.
 //!
-//! Law: `DetalleEspecificacTecnCodigoQRfactura.pdf` v0.5.0 (pinned
-//! under `contracts/aeat-verifactu/`). The URL carries EXACTLY the four
+//! Law: `DetalleEspecificacTecnCodigoQRfactura.pdf` v0.5.0 (facts and
+//! provenance in `contracts/aeat-verifactu/SOURCES.md`). The URL carries EXACTLY the four
 //! mandatory parameters — `nif`, `numserie`, `fecha` (dd-mm-yyyy),
 //! `importe` (2dp) — over one of four bases (§5): pruebas/production ×
 //! verificable (`ValidarQR`, the remission modality) / no verificable

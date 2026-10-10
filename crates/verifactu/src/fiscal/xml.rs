@@ -3,7 +3,7 @@
 //! its own `xmlns:sum1` (AEAT's own signed example's shape) so a signed
 //! record stays digest-stable under DOM extraction at AEAT.
 
-use crate::domain::chain::{ChainKind, ChainRecord, TipoFactura};
+use crate::domain::chain::{render_amount, ChainKind, ChainRecord, TipoFactura};
 use crate::domain::money::Money;
 use crate::domain::series;
 
@@ -50,7 +50,7 @@ pub enum SerializeError {
 /// §2.11); only the `&#xD;` character reference survives a DOM round-trip
 /// at AEAT byte-for-byte, so it is the only CR spelling signed text (and
 /// the huella recompute) can carry.
-fn escape_text(input: &str) -> std::borrow::Cow<'_, str> {
+pub(crate) fn escape_text(input: &str) -> std::borrow::Cow<'_, str> {
     if !input
         .bytes()
         .any(|b| matches!(b, b'&' | b'<' | b'>' | b'\r'))
@@ -68,12 +68,6 @@ fn escape_text(input: &str) -> std::borrow::Cow<'_, str> {
         }
     }
     std::borrow::Cow::Owned(out)
-}
-
-/// [`crate::domain::chain::render_amount`] itself — wire and huella share one
-/// renderer.
-fn render_amount(amount: Money) -> String {
-    crate::domain::chain::render_amount(amount)
 }
 
 fn integer_digits(rendered: &str) -> usize {
@@ -184,13 +178,11 @@ fn encadenamiento(record: &ChainRecord) -> Result<String, SerializeError> {
         None => tag(&mut out, "sum1:PrimerRegistro", "S"),
         Some(prev) => {
             check_nif("RegistroAnterior/IDEmisorFactura", &prev.issuer)?;
+            let num_serie = series::format(&prev.serie, prev.number);
+            check_num_serie("RegistroAnterior/NumSerieFactura", &num_serie)?;
             out.push_str("<sum1:RegistroAnterior>");
             tag(&mut out, "sum1:IDEmisorFactura", &prev.issuer);
-            tag(
-                &mut out,
-                "sum1:NumSerieFactura",
-                &series::format(&prev.serie, prev.number),
-            );
+            tag(&mut out, "sum1:NumSerieFactura", &num_serie);
             tag(
                 &mut out,
                 "sum1:FechaExpedicionFactura",
@@ -204,50 +196,40 @@ fn encadenamiento(record: &ChainRecord) -> Result<String, SerializeError> {
     Ok(out)
 }
 
-/// Exactly 9 CHARS, not bytes, and no edge whitespace: the huella cadena
-/// trims (HS §3) while the wire renders verbatim — a padded NIF would
-/// make hash and wire diverge.
+/// `NIFType` is any 9 characters; every NIF, NIE and CIF is 9 ASCII
+/// alphanumerics — anything else (edge whitespace the huella cadena
+/// would trim, a non-ASCII character AEAT's validator counts twice) can
+/// only be a typo, refused before it is hashed.
 pub(crate) fn check_nif(field: &'static str, nif: &str) -> Result<(), SerializeError> {
-    let chars = nif.chars().count();
-    if chars != 9 {
-        return Err(SerializeError::Field {
-            field,
-            problem: format!("NIF must be exactly 9 chars (NIFType), got {chars} ({nif:?})"),
-        });
+    if nif.len() == 9 && nif.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+        return Ok(());
     }
-    if nif.trim() != nif {
-        return Err(SerializeError::Field {
-            field,
-            problem: format!(
-                "NIF carries edge whitespace ({nif:?}) — the cadena trims it while the wire \
-                 renders it verbatim; they must not diverge"
-            ),
-        });
-    }
-    Ok(())
+    Err(SerializeError::Field {
+        field,
+        problem: format!("a NIF is 9 ASCII alphanumerics (NIFType), got {nif:?}"),
+    })
 }
 
 fn check_max(field: &'static str, value: &str, max: usize) -> Result<(), SerializeError> {
-    let count = value.chars().count();
+    let count = value.encode_utf16().count();
     if count > max {
         return Err(SerializeError::Field {
             field,
-            problem: format!("max {max} chars, got {count}"),
+            problem: format!("max {max} chars (UTF-16 code units), got {count}"),
         });
     }
     Ok(())
 }
 
-/// Control characters outside `#x9 | #xA | #xD` cannot be escaped into
-/// XML validity; the predicate is the read side's [`is_char_code`] — one
+/// Characters outside XML 1.0's `Char` production (the C0 controls but
+/// `#x9 | #xA | #xD`, `U+FFFE`, `U+FFFF`) cannot be escaped into XML
+/// validity; the predicate is the read side's [`is_char_code`] — one
 /// `Char` law for both edges.
 fn check_xml_chars(field: &'static str, value: &str) -> Result<(), SerializeError> {
     match value.chars().find(|ch| !is_char_code(u32::from(*ch))) {
         Some(offender) => Err(SerializeError::Field {
             field,
-            problem: format!(
-                "control character {offender:?} is not legal XML 1.0 (Char production)"
-            ),
+            problem: format!("character {offender:?} is not legal XML 1.0 (Char production)"),
         }),
         None => Ok(()),
     }
@@ -261,6 +243,44 @@ pub(crate) fn check_text(
     check_max(field, value, max)?;
     check_xml_chars(field, value)
 }
+
+/// `NumSerieFactura` (`TextoIDFacturaType`, 1..=60): printable ASCII
+/// only — the printed QR carries it, and the QR law admits ASCII
+/// 32..=126 — and no edge whitespace, because the huella cadena trims
+/// it while the wire renders it verbatim.
+pub(crate) fn check_num_serie(field: &'static str, value: &str) -> Result<(), SerializeError> {
+    let problem = if let Some(offender) = value.chars().find(|ch| !matches!(ch, ' '..='~')) {
+        format!("{offender:?} is not printable ASCII (32..=126)")
+    } else if value.is_empty() || value.len() > 60 {
+        format!("must be 1..=60 chars, got {}", value.len())
+    } else if value.trim() != value {
+        format!("{value:?} carries edge whitespace the huella would trim")
+    } else {
+        return Ok(());
+    };
+    Err(SerializeError::Field { field, problem })
+}
+
+/// SI.xsd's `CountryType2` enumeration, sorted (ISO 3166-1 alpha-2 as
+/// AEAT admits it) — `xsd_enumerations` pins it to the schema.
+pub const CODIGOS_PAIS: [&str; 246] = [
+    "AD", "AE", "AF", "AG", "AI", "AL", "AM", "AO", "AQ", "AR", "AS", "AT", "AU", "AW", "AZ", "BA",
+    "BB", "BD", "BE", "BF", "BG", "BH", "BI", "BJ", "BM", "BN", "BO", "BQ", "BR", "BS", "BT", "BV",
+    "BW", "BY", "BZ", "CA", "CC", "CD", "CF", "CG", "CH", "CI", "CK", "CL", "CM", "CN", "CO", "CR",
+    "CU", "CV", "CW", "CX", "CY", "CZ", "DE", "DJ", "DK", "DM", "DO", "DZ", "EC", "EE", "EG", "ER",
+    "ES", "ET", "FI", "FJ", "FK", "FM", "FO", "FR", "GA", "GB", "GD", "GE", "GG", "GH", "GI", "GL",
+    "GM", "GN", "GQ", "GR", "GS", "GT", "GU", "GW", "GY", "HK", "HM", "HN", "HR", "HT", "HU", "ID",
+    "IE", "IL", "IM", "IN", "IO", "IQ", "IR", "IS", "IT", "JE", "JM", "JO", "JP", "KE", "KG", "KH",
+    "KI", "KM", "KN", "KP", "KR", "KW", "KY", "KZ", "LA", "LB", "LC", "LI", "LK", "LR", "LS", "LT",
+    "LU", "LV", "LY", "MA", "MC", "MD", "ME", "MG", "MH", "MK", "ML", "MM", "MN", "MO", "MP", "MR",
+    "MS", "MT", "MU", "MV", "MW", "MX", "MY", "MZ", "NA", "NC", "NE", "NF", "NG", "NI", "NL", "NO",
+    "NP", "NR", "NU", "NZ", "OM", "PA", "PE", "PF", "PG", "PH", "PK", "PL", "PM", "PN", "PR", "PS",
+    "PT", "PW", "PY", "QA", "QU", "RE", "RO", "RS", "RU", "RW", "SA", "SB", "SC", "SD", "SE", "SG",
+    "SH", "SI", "SK", "SL", "SM", "SN", "SO", "SR", "SS", "ST", "SV", "SX", "SY", "SZ", "TC", "TD",
+    "TF", "TG", "TH", "TJ", "TK", "TL", "TM", "TN", "TO", "TR", "TT", "TV", "TW", "TZ", "UA", "UG",
+    "UM", "US", "UY", "UZ", "VA", "VC", "VE", "VG", "VI", "VN", "VU", "WF", "WS", "XB", "XG", "XN",
+    "XU", "YE", "YT", "ZA", "ZM", "ZW",
+];
 
 /// Serializes one `RegistroAlta` as a standalone document — the signer's
 /// signing unit (AEAT's own signed example is exactly this document).
@@ -299,6 +319,8 @@ pub(crate) fn registro_alta(
         *cuota_total,
         *importe_total,
     )?;
+    let num_serie = series::format(serie, *number);
+    check_num_serie("IDFactura/NumSerieFactura", &num_serie)?;
     let descripcion = ctx
         .descripcion_operacion
         .expect("check_alta established the descripcion");
@@ -310,11 +332,7 @@ pub(crate) fn registro_alta(
     tag(&mut out, "sum1:IDVersion", ID_VERSION);
     out.push_str("<sum1:IDFactura>");
     tag(&mut out, "sum1:IDEmisorFactura", issuer);
-    tag(
-        &mut out,
-        "sum1:NumSerieFactura",
-        &series::format(serie, *number),
-    );
+    tag(&mut out, "sum1:NumSerieFactura", &num_serie);
     tag(
         &mut out,
         "sum1:FechaExpedicionFactura",
@@ -499,10 +517,9 @@ fn check_alta(
     }
     for rectificada in ctx.facturas_rectificadas {
         check_nif("IDFacturaRectificada/IDEmisorFactura", &rectificada.nif)?;
-        check_text(
+        check_num_serie(
             "IDFacturaRectificada/NumSerieFactura",
             &rectificada.num_serie,
-            60,
         )?;
     }
     // Validaciones §3.6: obligatory on Sustitutiva, forbidden otherwise.
@@ -536,18 +553,7 @@ fn check_alta(
         }
         _ => {}
     }
-    // Destinatarios (AEAT validation 1189, live-confirmed at pruebas
-    // 2026-10-05): obligatory on F1/F3/R1-R4, optional on F2/R5.
-    let requires_destinatarios = matches!(
-        tipo_factura,
-        TipoFactura::F1
-            | TipoFactura::F3
-            | TipoFactura::R1
-            | TipoFactura::R2
-            | TipoFactura::R3
-            | TipoFactura::R4
-    );
-    if requires_destinatarios && ctx.destinatarios.is_empty() {
+    if tipo_factura.requires_destinatario() && ctx.destinatarios.is_empty() {
         return Err(SerializeError::Cardinality {
             element: "Destinatarios",
             problem: format!(
@@ -569,11 +575,12 @@ fn check_alta(
             }
             IdentificacionDestinatario::Otro(otro) => {
                 if let Some(pais) = &otro.codigo_pais {
-                    if pais.chars().count() != 2 || !pais.chars().all(|c| c.is_ascii_alphabetic()) {
+                    if CODIGOS_PAIS.binary_search(&pais.as_str()).is_err() {
                         return Err(SerializeError::Field {
                             field: "IDDestinatario/IDOtro/CodigoPais",
                             problem: format!(
-                                "CodigoPais is ISO 3166-1 alpha-2 (2 letters), got {pais:?}"
+                                "{pais:?} is not a CountryType2 code (uppercase ISO 3166-1 \
+                                 alpha-2)"
                             ),
                         });
                     }
@@ -716,6 +723,8 @@ pub(crate) fn registro_anulacion(
     if let Some(ref_ext) = ctx.ref_externa {
         check_text("RefExterna", ref_ext, 60)?;
     }
+    let num_serie = series::format(serie, *number);
+    check_num_serie("IDFactura/NumSerieFacturaAnulada", &num_serie)?;
 
     let mut out = String::with_capacity(1024);
     out.push_str("<sum1:RegistroAnulacion xmlns:sum1=\"");
@@ -724,11 +733,7 @@ pub(crate) fn registro_anulacion(
     tag(&mut out, "sum1:IDVersion", ID_VERSION);
     out.push_str("<sum1:IDFactura>");
     tag(&mut out, "sum1:IDEmisorFacturaAnulada", issuer);
-    tag(
-        &mut out,
-        "sum1:NumSerieFacturaAnulada",
-        &series::format(serie, *number),
-    );
+    tag(&mut out, "sum1:NumSerieFacturaAnulada", &num_serie);
     tag(
         &mut out,
         "sum1:FechaExpedicionFacturaAnulada",
@@ -901,26 +906,17 @@ pub enum CabeceraRemision<'a> {
     Requerimiento { referencia: &'a str, fin: bool },
 }
 
-/// One whole envío (SW §6): each signed record in its own
-/// `RegistroFactura`, embedded verbatim.
+/// One whole envío (SW §6): the Cabecera — `ObligadoEmision`, the
+/// optional `Representante`, the remission block, in SI.xsd sequence —
+/// then each signed record in its own `RegistroFactura`, embedded
+/// verbatim.
 ///
 /// # Errors
 /// [`SerializeError::Cardinality`] when empty or over the 1000-record
 /// envío limit.
 pub fn reg_factu_document(
     obligado: &Obligado,
-    remision: &CabeceraRemision<'_>,
-    signed_records: &[String],
-) -> Result<String, SerializeError> {
-    reg_factu_document_full(obligado, None, remision, signed_records)
-}
-
-/// [`reg_factu_document`] plus the Cabecera `Representante`, which
-/// renders between `ObligadoEmision` and the remission block (SI.xsd
-/// sequence).
-pub(crate) fn reg_factu_document_full(
-    obligado: &Obligado,
-    representante: Option<&crate::fiscal::Representante>,
+    representante: Option<&Obligado>,
     remision: &CabeceraRemision<'_>,
     signed_records: &[String],
 ) -> Result<String, SerializeError> {
@@ -1021,8 +1017,9 @@ impl Tree {
     }
 }
 
-/// `&#0;` parses as a number but is not XML — references must denote a
-/// legal `Char`.
+/// XML 1.0's `Char` production: `#x9 | #xA | #xD | [#x20-#xD7FF] |
+/// [#xE000-#xFFFD] | [#x10000-#x10FFFF]`. `&#0;` parses as a number but
+/// is not XML — references must denote a legal `Char`.
 fn is_char_code(code: u32) -> bool {
     matches!(
         code,
@@ -1307,7 +1304,9 @@ pub(crate) fn sent_request(envelope: &str) -> Result<SentRequest, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{check_text, parse_tree, registro_alta, EmissionContext, Tree};
+    use proptest::prelude::Strategy as _;
+
+    use super::{check_text, escape_text, parse_tree, registro_alta, EmissionContext, Tree};
     use crate::fiscal::tests_support::{iva_super, obligado, primer_alta_record, sif};
 
     /// No live bench leg exercises escaping.
@@ -1338,12 +1337,75 @@ mod tests {
         tree.children.iter().find_map(|child| find(child, local))
     }
 
-    /// `Char` ends at `[#x10000-#x10FFFF]` — the supplementary planes
-    /// (emoji in a client's name) are legal on both edges.
+    /// The independent oracle: a conformant XML 1.0 parser's reading of
+    /// `text` escaped as element content — `None` when it refuses.
+    fn conformant_reading(text: &str) -> Option<String> {
+        let document = format!("<a>{}</a>", escape_text(text));
+        let parsed = uppsala::parse(&document).ok()?;
+        let root = parsed.document_element()?;
+        Some(parsed.text_content_deep(root))
+    }
+
+    /// One `Char` law, three readers: what [`check_text`] admits is
+    /// exactly what a conformant XML 1.0 parser accepts, and both it and
+    /// our own [`parse_tree`] read the escaped bytes back verbatim.
+    fn assert_char_law(text: &str) {
+        let admitted = check_text("Field", text, usize::MAX).is_ok();
+        let conformant = conformant_reading(text);
+        assert_eq!(
+            admitted,
+            conformant.is_some(),
+            "check_text and XML 1.0 disagree on {text:?}"
+        );
+        if admitted {
+            assert_eq!(conformant.as_deref(), Some(text), "conformant read-back");
+            let ours = parse_tree(&format!("<a>{}</a>", escape_text(text))).expect("ours parses");
+            assert_eq!(ours.text, text, "parse_tree read-back");
+        }
+        let reference = format!(
+            "<a>&#x{:X};</a>",
+            text.chars().next().map_or(0x41, u32::from)
+        );
+        assert_eq!(
+            parse_tree(&reference).is_ok(),
+            uppsala::parse(&reference).is_ok(),
+            "character-reference decoding disagrees with XML 1.0 on {reference}"
+        );
+    }
+
+    /// Every edge of every `Char` range (U+1F338 is the emoji a client's
+    /// name once carried into a refused record).
     #[test]
-    fn supplementary_plane_chars_serialize_and_round_trip() {
-        let descripcion = "Floristería 🌸 \u{1_0000} \u{10_FFFF} \u{FFFD}";
-        assert!(check_text("DescripcionOperacion", descripcion, 500).is_ok());
+    fn the_char_law_agrees_with_xml_1_0_at_every_range_edge() {
+        let edges = (0..=0x20)
+            .chain([
+                0x7F, 0x80, 0x85, 0xD7FF, 0xE000, 0xFEFF, 0xFFFD, 0xFFFE, 0xFFFF,
+            ])
+            .chain([0x1_0000, 0x1_F338, 0xF_FFFF, 0x10_0000, 0x10_FFFF]);
+        for code in edges {
+            let ch = char::from_u32(code).expect("scalar value");
+            assert_char_law(&format!("a{ch}b"));
+        }
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(512))]
+
+        #[test]
+        fn the_char_law_agrees_with_xml_1_0_on_arbitrary_text(
+            text in proptest::collection::vec(proptest::char::any(), 0..24)
+                .prop_map(|chars| chars.into_iter().collect::<String>()),
+        ) {
+            assert_char_law(&text);
+        }
+    }
+
+    /// The serializer's text reaches the record verbatim: a description
+    /// carrying markup, a CR and a supplementary-plane character reads
+    /// back unchanged from the serialized `RegistroAlta`.
+    #[test]
+    fn record_text_round_trips_through_the_serializer() {
+        let descripcion = "Floristería 🌸 & <rosas>\r\n\u{10_FFFF}";
         let desglose = [iva_super()];
         let ctx = EmissionContext {
             descripcion_operacion: Some(descripcion),
@@ -1355,25 +1417,5 @@ mod tests {
         let tree = parse_tree(&node).expect("reads back");
         let read = find(&tree, "DescripcionOperacion").expect("element present");
         assert_eq!(read.text, descripcion);
-
-        let referenced = parse_tree("<a>&#x1F338;&#128056;&#x10000;&#x10FFFF;</a>")
-            .expect("supplementary references decode");
-        assert_eq!(referenced.text, "🌸🐸\u{1_0000}\u{10_FFFF}");
-    }
-
-    #[test]
-    fn non_chars_still_refuse_on_both_edges() {
-        for code in (0x0..=0x8).chain([0xB, 0xC, 0x1F, 0xFFFE, 0xFFFF]) {
-            let ch = char::from_u32(code).expect("scalar value");
-            assert!(
-                check_text("DescripcionOperacion", &format!("a{ch}b"), 500).is_err(),
-                "U+{code:04X} must refuse on write"
-            );
-            assert!(
-                parse_tree(&format!("<a>&#x{code:X};</a>")).is_err(),
-                "&#x{code:X}; must refuse on read"
-            );
-        }
-        assert!(parse_tree("<a>&#x110000;</a>").is_err());
     }
 }

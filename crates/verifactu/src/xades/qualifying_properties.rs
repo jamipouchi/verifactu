@@ -1,10 +1,11 @@
 //! `QualifyingProperties` fragment builder — element order per the
-//! `XAdES` 1.3.2 schema (`contracts/aeat-verifactu/XAdES.xsd`); X.509
-//! facts parsed via `x509-cert` because bergshamra-keys keeps the
-//! chain opaque.
+//! `XAdES` 1.3.2 schema (ETSI TS 101 903); X.509 facts parsed via
+//! `x509-cert` because bergshamra-keys keeps the chain opaque.
+
+use base64::Engine as _;
 
 use crate::clock::Timestamp;
-use base64::Engine as _;
+use crate::fiscal::xml::escape_text;
 
 use crate::xades::iso8601;
 use crate::xades::policy::{PolicyHash, PolicyProfile};
@@ -210,20 +211,4 @@ fn format_serial_decimal(bytes: &[u8]) -> String {
     }
     digits.reverse();
     String::from_utf8(digits).expect("serial digits are ASCII by construction")
-}
-
-fn escape_text(text: &str) -> std::borrow::Cow<'_, str> {
-    if !text.contains(['&', '<', '>']) {
-        return std::borrow::Cow::Borrowed(text);
-    }
-    let mut out = String::with_capacity(text.len());
-    for ch in text.chars() {
-        match ch {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            _ => out.push(ch),
-        }
-    }
-    std::borrow::Cow::Owned(out)
 }

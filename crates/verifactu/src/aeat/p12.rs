@@ -2,7 +2,7 @@
 //! `bergshamra-pkcs12` parser the signing leg rides, so the `XAdES`
 //! key and the TLS key come from one archive.
 
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
 pub struct ClientIdentity {
     chain: Vec<CertificateDer<'static>>,
@@ -75,7 +75,9 @@ pub fn identity_from_pkcs12(pfx: &[u8], password: &str) -> Result<ClientIdentity
     }
     Ok(ClientIdentity {
         chain: order_leaf_first(chain),
-        key: PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.as_ref().to_vec())),
+        key: PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(
+            key.as_ref().to_vec(),
+        )),
     })
 }
 

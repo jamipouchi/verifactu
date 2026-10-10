@@ -17,14 +17,26 @@ pub fn huella(cadena: &str) -> String {
     hex::encode_upper(Sha256::digest(cadena.as_bytes()))
 }
 
-/// The `RegistroAlta` huella input as a free function (HS §3.a): the
-/// consulta-verification half recomputes AEAT's STORED huella from the
-/// fields the consulta respuesta echoes — the same push order and
-/// trim law as [`ChainRecord::cadena`]'s Alta arm.
-/// The `RegistroAlta` huella input (HS §3.a) over TEXT amounts: the consulta-verification half
-/// recomputes from AEAT's echoed decimals verbatim — HS §3 makes 1-
-/// and 2-decimal renderings equally valid, so re-rendering through
-/// [`render_amount`] would false-negative a legally-echoed `41.4`.
+/// HS §3's input grammar: `name=value` pairs joined by `&`, values
+/// trimmed, `name=` for empties, no trailing separator.
+fn cadena_of(pairs: &[(&str, &str)]) -> String {
+    let mut out = String::with_capacity(288);
+    for (index, (name, value)) in pairs.iter().enumerate() {
+        if index > 0 {
+            out.push('&');
+        }
+        out.push_str(name);
+        out.push('=');
+        out.push_str(value.trim());
+    }
+    out
+}
+
+/// The `RegistroAlta` huella (HS §3.a) over TEXT amounts: the consulta
+/// read-back recomputes AEAT's STORED huella from the decimals it
+/// echoes verbatim — HS §3 makes 1- and 2-decimal renderings equally
+/// valid, so re-rendering through [`render_amount`] would
+/// false-negative a legally-echoed `41.4`.
 #[allow(clippy::too_many_arguments)] // the HS §3.a input is eight named fields, by law
 #[must_use]
 pub fn huella_alta_montos(
@@ -37,23 +49,16 @@ pub fn huella_alta_montos(
     huella_previa: Option<&str>,
     fecha_huso_gen: &str,
 ) -> String {
-    fn push_pair(out: &mut String, name: &str, value: &str) {
-        out.push_str(name);
-        out.push('=');
-        out.push_str(value.trim());
-        out.push('&');
-    }
-    let mut out = String::with_capacity(256);
-    push_pair(&mut out, "IDEmisorFactura", id_emisor_factura);
-    push_pair(&mut out, "NumSerieFactura", num_serie_factura);
-    push_pair(&mut out, "FechaExpedicionFactura", fecha_expedicion_factura);
-    push_pair(&mut out, "TipoFactura", tipo_factura);
-    push_pair(&mut out, "CuotaTotal", cuota_total);
-    push_pair(&mut out, "ImporteTotal", importe_total);
-    push_pair(&mut out, "Huella", huella_previa.unwrap_or(""));
-    push_pair(&mut out, "FechaHoraHusoGenRegistro", fecha_huso_gen);
-    out.truncate(out.len() - 1);
-    huella(&out)
+    huella(&cadena_of(&[
+        ("IDEmisorFactura", id_emisor_factura),
+        ("NumSerieFactura", num_serie_factura),
+        ("FechaExpedicionFactura", fecha_expedicion_factura),
+        ("TipoFactura", tipo_factura),
+        ("CuotaTotal", cuota_total),
+        ("ImporteTotal", importe_total),
+        ("Huella", huella_previa.unwrap_or("")),
+        ("FechaHoraHusoGenRegistro", fecha_huso_gen),
+    ]))
 }
 
 /// The previous invoice-chain record's identity + huella (HS §3.a/b).
@@ -160,6 +165,14 @@ impl TipoFactura {
     pub const fn is_rectificativa(self) -> bool {
         matches!(self, Self::R1 | Self::R2 | Self::R3 | Self::R4 | Self::R5)
     }
+
+    /// AEAT validation 1189 (live-confirmed at pruebas 2026-10-05): the
+    /// counterparty is REQUIRED on `F1`/`F3`/`R1`–`R4`, optional on the
+    /// simplificadas `F2`/`R5`.
+    #[must_use]
+    pub const fn requires_destinatario(self) -> bool {
+        !matches!(self, Self::F2 | Self::R5)
+    }
 }
 
 /// Renders a huella-input amount at exactly 2 decimals ([`Money`]'s
@@ -262,13 +275,7 @@ impl ChainRecord {
     /// ([`series::format`]'s bug class).
     #[must_use]
     pub fn cadena(&self) -> String {
-        fn push_pair(out: &mut String, name: &str, value: &str) {
-            out.push_str(name);
-            out.push('=');
-            out.push_str(value.trim());
-            out.push('&');
-        }
-        let mut out = String::with_capacity(288);
+        let prev_huella = self.prev.as_ref().map_or("", |prev| prev.huella.as_str());
         match &self.kind {
             ChainKind::Alta {
                 issuer,
@@ -279,88 +286,71 @@ impl ChainRecord {
                 cuota_total,
                 importe_total,
                 fecha_huso_gen,
-            } => {
-                push_pair(&mut out, "IDEmisorFactura", issuer);
-                push_pair(&mut out, "NumSerieFactura", &series::format(serie, *number));
-                push_pair(
-                    &mut out,
-                    "FechaExpedicionFactura",
-                    fecha_expedicion.as_str(),
-                );
-                push_pair(&mut out, "TipoFactura", tipo_factura.as_str());
-                push_pair(&mut out, "CuotaTotal", &render_amount(*cuota_total));
-                push_pair(&mut out, "ImporteTotal", &render_amount(*importe_total));
-                push_pair(
-                    &mut out,
-                    "Huella",
-                    self.prev.as_ref().map_or("", |prev| prev.huella.as_str()),
-                );
-                push_pair(
-                    &mut out,
-                    "FechaHoraHusoGenRegistro",
-                    fecha_huso_gen.as_str(),
-                );
-            }
+            } => cadena_of(&[
+                ("IDEmisorFactura", issuer),
+                ("NumSerieFactura", &series::format(serie, *number)),
+                ("FechaExpedicionFactura", fecha_expedicion.as_str()),
+                ("TipoFactura", tipo_factura.as_str()),
+                ("CuotaTotal", &render_amount(*cuota_total)),
+                ("ImporteTotal", &render_amount(*importe_total)),
+                ("Huella", prev_huella),
+                ("FechaHoraHusoGenRegistro", fecha_huso_gen.as_str()),
+            ]),
             ChainKind::Anulacion {
                 issuer,
                 serie,
                 number,
                 fecha_expedicion,
                 fecha_huso_gen,
-            } => {
-                push_pair(&mut out, "IDEmisorFacturaAnulada", issuer);
-                push_pair(
-                    &mut out,
-                    "NumSerieFacturaAnulada",
-                    &series::format(serie, *number),
-                );
-                push_pair(
-                    &mut out,
-                    "FechaExpedicionFacturaAnulada",
-                    fecha_expedicion.as_str(),
-                );
-                push_pair(
-                    &mut out,
-                    "Huella",
-                    self.prev.as_ref().map_or("", |prev| prev.huella.as_str()),
-                );
-                push_pair(
-                    &mut out,
-                    "FechaHoraHusoGenRegistro",
-                    fecha_huso_gen.as_str(),
-                );
-            }
+            } => cadena_of(&[
+                ("IDEmisorFacturaAnulada", issuer),
+                ("NumSerieFacturaAnulada", &series::format(serie, *number)),
+                ("FechaExpedicionFacturaAnulada", fecha_expedicion.as_str()),
+                ("Huella", prev_huella),
+                ("FechaHoraHusoGenRegistro", fecha_huso_gen.as_str()),
+            ]),
             ChainKind::Evento {
                 event,
                 fecha_huso_gen_evento,
-            } => {
-                push_pair(&mut out, "NIF", &event.nif);
-                push_pair(&mut out, "ID", &event.id);
-                push_pair(
-                    &mut out,
-                    "IdSistemaInformatico",
-                    &event.id_sistema_informatico,
-                );
-                push_pair(&mut out, "Version", &event.version);
-                push_pair(&mut out, "NumeroInstalacion", &event.numero_instalacion);
-                push_pair(&mut out, "NIF", &event.nif_obligado);
-                push_pair(&mut out, "TipoEvento", &event.tipo_evento);
-                push_pair(
-                    &mut out,
+            } => cadena_of(&[
+                ("NIF", &event.nif),
+                ("ID", &event.id),
+                ("IdSistemaInformatico", &event.id_sistema_informatico),
+                ("Version", &event.version),
+                ("NumeroInstalacion", &event.numero_instalacion),
+                ("NIF", &event.nif_obligado),
+                ("TipoEvento", &event.tipo_evento),
+                (
                     "HuellaEvento",
                     self.prev_evento_huella.as_deref().unwrap_or(""),
-                );
-                push_pair(
-                    &mut out,
-                    "FechaHoraHusoGenEvento",
-                    fecha_huso_gen_evento.as_str(),
-                );
-            }
+                ),
+                ("FechaHoraHusoGenEvento", fecha_huso_gen_evento.as_str()),
+            ]),
         }
-        out.pop();
-        out
     }
 
+    /// Whether the stored huella is the hash of this record's own
+    /// cadena — false means a field changed after sealing.
+    #[must_use]
+    pub fn huella_recomputes(&self) -> bool {
+        self.huella == huella(&self.cadena())
+    }
+
+    /// The predecessor this record states it was sealed onto (`None` on
+    /// a chain's first record) — or `Err` when the OTHER family's slot
+    /// is populated, which [`ChainRecord::seal`] never does.
+    fn sealed_onto(&self) -> Result<Option<Predecessor>, ()> {
+        match (&self.kind, &self.prev, &self.prev_evento_huella) {
+            (ChainKind::Evento { .. }, None, prev) => Ok(prev.clone().map(Predecessor::Evento)),
+            (ChainKind::Alta { .. } | ChainKind::Anulacion { .. }, prev, None) => {
+                Ok(prev.clone().map(Predecessor::Factura))
+            }
+            _ => Err(()),
+        }
+    }
+
+    /// The cursor the NEXT record seals onto: this record's chain
+    /// coordinates plus its huella.
     #[must_use]
     pub fn predecessor(&self) -> Predecessor {
         match &self.kind {
@@ -403,8 +393,7 @@ impl ChainRecord {
             let id_informed = !event.id.trim().is_empty();
             assert!(
                 nif_informed != id_informed,
-                "evento identity is exactly one of NIF or ID (HS §3, \
-                 excluyente)"
+                "evento identity is exactly one of NIF or ID (HS §3, excluyente)"
             );
         }
         let (prev_ref, prev_evento_huella) = match (&kind, prev) {
@@ -421,16 +410,14 @@ impl ChainRecord {
                 Some(Predecessor::Evento(_)),
             ) => {
                 panic!(
-                    "invoice records chain only off invoice records — an \
-                     evento predecessor mixes the chain families (HS §3, \
-                    )"
+                    "invoice records chain only off invoice records — an evento \
+                     predecessor mixes the chain families (HS §3)"
                 );
             }
             (ChainKind::Evento { .. }, Some(Predecessor::Factura(_))) => {
                 panic!(
-                    "evento records chain only off evento records — an \
-                     invoice predecessor mixes the chain families (HS §3, \
-                    )"
+                    "evento records chain only off evento records — an invoice \
+                     predecessor mixes the chain families (HS §3)"
                 );
             }
         };
@@ -446,11 +433,45 @@ impl ChainRecord {
     }
 }
 
+/// Where a stored chain stops verifying, by position.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum ChainBreak {
+    /// The record's huella does not recompute over its own fields.
+    #[error("record {index}: the stored huella does not recompute")]
+    Huella { index: usize },
+    /// The record is not sealed onto the one before it (or, first in the
+    /// slice, it states a predecessor).
+    #[error("record {index}: not sealed onto the record before it")]
+    Link { index: usize },
+}
+
+/// Audits one chain family — an installation's invoice records, or its
+/// event records — in append order: every huella recomputes, the first
+/// record is a chain's first (`PrimerRegistro`/`PrimerEvento`), and
+/// every later one is sealed onto exactly the record before it. An
+/// empty slice verifies.
+///
+/// # Errors
+/// [`ChainBreak`] at the first record that fails.
+pub fn verify_chain(records: &[ChainRecord]) -> Result<(), ChainBreak> {
+    let mut previous: Option<Predecessor> = None;
+    for (index, record) in records.iter().enumerate() {
+        if !record.huella_recomputes() {
+            return Err(ChainBreak::Huella { index });
+        }
+        if record.sealed_onto() != Ok(previous) {
+            return Err(ChainBreak::Link { index });
+        }
+        previous = Some(record.predecessor());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        huella, ChainKind, ChainRecord, EventData, FechaExpedicion, FechaHuso, Money, Series,
-        TipoFactura,
+        huella, verify_chain, ChainBreak, ChainKind, ChainRecord, EventData, FechaExpedicion,
+        FechaHuso, Money, Series, TipoFactura,
     };
 
     fn fecha(value: &str) -> FechaExpedicion {
@@ -575,6 +596,58 @@ mod tests {
             .cadena()
             .contains("CuotaTotal=0.00&ImporteTotal=0.00"));
         assert_eq!(record.huella, huella(&record.cadena()));
+    }
+
+    /// The audit catches each way a stored chain can go wrong: a field
+    /// edited after sealing, a record out of order, a first record that
+    /// claims a predecessor, the event slot stuffed on an invoice.
+    #[test]
+    fn verify_chain_pins_the_first_break() {
+        let alta = |number: u64, prev: Option<&ChainRecord>| {
+            ChainRecord::seal(
+                ChainKind::Alta {
+                    issuer: String::from("B12345678"),
+                    serie: Series::T,
+                    number,
+                    fecha_expedicion: fecha("01-01-2024"),
+                    tipo_factura: TipoFactura::F2,
+                    cuota_total: Money::from_cents(210),
+                    importe_total: Money::from_cents(1210),
+                    fecha_huso_gen: instante("2024-01-01T19:20:30+01:00"),
+                },
+                0,
+                prev.map(ChainRecord::predecessor).as_ref(),
+            )
+        };
+        let first = alta(1, None);
+        let second = alta(2, Some(&first));
+        let third = alta(3, Some(&second));
+        let chain = [first.clone(), second.clone(), third.clone()];
+        assert_eq!(verify_chain(&chain), Ok(()));
+        assert_eq!(verify_chain(&[]), Ok(()));
+
+        let mut edited = chain.clone();
+        if let ChainKind::Alta { importe_total, .. } = &mut edited[1].kind {
+            *importe_total = Money::from_cents(1211);
+        }
+        assert_eq!(verify_chain(&edited), Err(ChainBreak::Huella { index: 1 }));
+
+        assert_eq!(
+            verify_chain(&[first.clone(), third.clone()]),
+            Err(ChainBreak::Link { index: 1 })
+        );
+        assert_eq!(
+            verify_chain(&[second.clone(), third]),
+            Err(ChainBreak::Link { index: 0 })
+        );
+
+        let mut stuffed = first;
+        stuffed.prev_evento_huella = Some(second.huella);
+        assert_eq!(
+            verify_chain(&[stuffed]),
+            Err(ChainBreak::Link { index: 0 }),
+            "the event slot is not hashed on an invoice — only the link check sees it"
+        );
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! The consulta operation (`ConsultaFactuSistemaFacturacion`, WSDL's
 //! `sfVerifactu` binding — the SAME `VerifactuSOAP` door as remission,
 //! empty `soapAction`): AEAT's read-back of the records it stores, per
-//! `ConsultaLR.xsd` + `RespuestaConsultaLR.xsd` (pinned under
+//! `ConsultaLR.xsd` + `RespuestaConsultaLR.xsd` (vendored under
 //! `contracts/aeat-verifactu/`).
 //!
 //! The cabecera's `IndicadorRepresentante=S` is the apoderado door
@@ -18,13 +18,12 @@
 
 use std::sync::Arc;
 
-use crate::domain::chain::{huella_alta_montos, FechaExpedicion, TipoFactura};
-use crate::domain::money::Money;
-use crate::fiscal::response::classify_fault;
-use crate::fiscal::transport::TransportOutcome;
-use crate::fiscal::xml::{self, tag, Tree};
 use rust_decimal::Decimal;
 
+use crate::domain::chain::{huella_alta_montos, FechaExpedicion, TipoFactura};
+use crate::domain::money::Money;
+use crate::fiscal::transport::{TransportOutcome, VerifactuTransport};
+use crate::fiscal::xml::{self, tag, Tree};
 use crate::fiscal::{EmitError, Obligado};
 
 const NS_CONSULTA: &str = "https://www2.agenciatributaria.gob.es/static_files/common/internet/dep/aplicaciones/es/aeat/tike/cont/ws/ConsultaLR.xsd";
@@ -38,6 +37,8 @@ const P_RC: &str = "sfRC";
 pub struct Mes(u8);
 
 impl Mes {
+    pub const ENERO: Self = Self(1);
+
     /// # Errors
     /// Prose `Err` outside 1..=12.
     pub fn try_new(mes: u8) -> Result<Self, String> {
@@ -125,11 +126,19 @@ impl ResultadoConsulta {
             other => Err(format!("off-vocabulary ResultadoConsulta: {other}")),
         }
     }
+
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ConDatos => "ConDatos",
+            Self::SinDatos => "SinDatos",
+        }
+    }
 }
 
 /// The STORED record's estado (`EstadoRegistroType` of the consulta
 /// respuesta — a different vocabulary from the submission line's).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, strum::EnumIter)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub enum EstadoAlmacenado {
     Correcto,
@@ -181,12 +190,7 @@ pub struct RegistroConsulta {
 }
 
 fn parse_importe(text: &str) -> Option<Money> {
-    let value = text.parse::<Decimal>().ok()?;
-    if value.scale() <= 2 {
-        Some(Money::from_decimal(value))
-    } else {
-        None
-    }
+    Money::try_from_decimal(text.parse::<Decimal>().ok()?)
 }
 
 impl RegistroConsulta {
@@ -261,60 +265,41 @@ pub struct ConsultaAnswer {
 /// [`EmitError::InvalidRecord`] when any SI.xsd simple type is
 /// violated (NIF, text lengths, the period codes).
 pub(crate) fn consulta_document(request: &ConsultaRequest<'_>) -> Result<String, EmitError> {
-    let invalid = |detail: String| EmitError::InvalidRecord { detail };
-    xml::check_nif("Consulta/ObligadoEmision/NIF", &request.obligado.nif)
-        .map_err(|error| invalid(error.to_string()))?;
+    xml::check_nif("Consulta/ObligadoEmision/NIF", &request.obligado.nif)?;
     xml::check_text(
         "Consulta/ObligadoEmision/NombreRazon",
         &request.obligado.nombre_razon,
         120,
-    )
-    .map_err(|error| invalid(error.to_string()))?;
+    )?;
     if !(1000..=9999).contains(&request.filtro.ejercicio) {
-        return Err(invalid(format!(
-            "Ejercicio is a 4-digit year, got {}",
-            request.filtro.ejercicio
-        )));
+        return Err(EmitError::InvalidRecord {
+            detail: format!(
+                "Ejercicio is a 4-digit year, got {}",
+                request.filtro.ejercicio
+            ),
+        });
     }
     if let Some(num_serie) = request.filtro.num_serie {
-        // TextoIDFacturaType carries minLength 1 — an empty narrowing
-        // element is off-contract, not "no narrowing".
-        if num_serie.is_empty() {
-            return Err(invalid(String::from(
-                "Consulta/NumSerieFactura is 1..60 chars (TextoIDFacturaType minLength 1), \
-                 got empty",
-            )));
-        }
-        xml::check_text("Consulta/NumSerieFactura", num_serie, 60)
-            .map_err(|error| invalid(error.to_string()))?;
+        xml::check_num_serie("Consulta/NumSerieFactura", num_serie)?;
     }
     if let Some(ref_externa) = request.filtro.ref_externa {
-        xml::check_text("Consulta/RefExterna", ref_externa, 60)
-            .map_err(|error| invalid(error.to_string()))?;
+        xml::check_text("Consulta/RefExterna", ref_externa, 60)?;
     }
     if let Some(clave) = request.clave_paginacion {
         xml::check_nif(
             "Consulta/ClavePaginacion/IDEmisorFactura",
             &clave.id_emisor_factura,
-        )
-        .map_err(|error| invalid(error.to_string()))?;
-        // TextoIDFacturaType carries minLength 1 here too.
-        if clave.num_serie_factura.is_empty() {
-            return Err(invalid(String::from(
-                "Consulta/ClavePaginacion/NumSerieFactura is 1..60 chars \
-                 (TextoIDFacturaType minLength 1), got empty",
-            )));
-        }
-        xml::check_text(
+        )?;
+        xml::check_num_serie(
             "Consulta/ClavePaginacion/NumSerieFactura",
             &clave.num_serie_factura,
-            60,
-        )
-        .map_err(|error| invalid(error.to_string()))?;
+        )?;
         if FechaExpedicion::parse(&clave.fecha_expedicion_factura).is_none() {
-            return Err(invalid(String::from(
-                "Consulta/ClavePaginacion/FechaExpedicionFactura is not dd-mm-yyyy",
-            )));
+            return Err(EmitError::InvalidRecord {
+                detail: String::from(
+                    "Consulta/ClavePaginacion/FechaExpedicionFactura is not dd-mm-yyyy",
+                ),
+            });
         }
     }
 
@@ -517,47 +502,34 @@ fn registro_of_tree(node: &Tree) -> Result<RegistroConsulta, String> {
 /// [`EmitError::FaultClient`]/[`EmitError::FaultServer`] on a SOAP
 /// fault.
 pub async fn send_once(
-    transport: &Arc<dyn crate::fiscal::transport::VerifactuTransport>,
+    transport: &Arc<dyn VerifactuTransport>,
     request: &ConsultaRequest<'_>,
 ) -> Result<ConsultaAnswer, EmitError> {
     let body = consulta_document(request)?;
-    let envelope = xml::soap_envelope(&body);
-    match transport.send(&envelope).await {
-        Err(failure) => Err(EmitError::Transport {
-            detail: failure.detail,
-        }),
-        Ok(TransportOutcome::Fault(fault)) => Err(match classify_fault(&fault) {
-            crate::domain::error::ErrorClass::Transient => EmitError::FaultServer {
-                faultstring: fault.faultstring,
-            },
-            _ => EmitError::FaultClient {
-                faultstring: fault.faultstring,
-            },
-        }),
-        Ok(TransportOutcome::Consulta(answer)) => Ok(answer),
-        Ok(TransportOutcome::Response(_)) => Err(EmitError::Transport {
+    match transport.send(&xml::soap_envelope(&body)).await? {
+        TransportOutcome::Fault(fault) => Err(fault.into()),
+        TransportOutcome::Consulta(answer) => Ok(answer),
+        TransportOutcome::Response(_) => Err(EmitError::Transport {
             detail: String::from("AEAT answered a submission respuesta to a consulta"),
         }),
     }
 }
 
-/// The product door: every page, merged, in call order. The consulta
-/// modality's own transport answer rides [`Modality`] configuration —
-/// consultas always dial the `VerifactuSOAP` family.
+/// The product door: every page, merged, in call order. Consultas ride
+/// the same `VerifactuSOAP` endpoint as remission.
 ///
 /// # Errors
 /// [`EmitError`] from [`send_once`]; a `Transport` error when AEAT
 /// signals more pages without a pagination key, or the pages exceed
 /// 100 (a bug class, never an input).
 pub async fn send_all(
-    transport: &Arc<dyn crate::fiscal::transport::VerifactuTransport>,
+    transport: &Arc<dyn VerifactuTransport>,
     obligado: &Obligado,
     apoderado: bool,
     filtro: &ConsultaFilter<'_>,
 ) -> Result<ConsultaAnswer, EmitError> {
     let mut clave: Option<ClavePaginacion> = None;
     let mut registros = Vec::new();
-    let mut resultado;
     for _ in 0..100 {
         let page = send_once(
             transport,
@@ -569,24 +541,23 @@ pub async fn send_all(
             },
         )
         .await?;
-        resultado = page.resultado;
         registros.extend(page.registros);
         if !page.paginacion_pendiente {
             return Ok(ConsultaAnswer {
-                resultado,
+                resultado: page.resultado,
                 paginacion_pendiente: false,
                 clave_paginacion: None,
                 registros,
             });
         }
-        clave = page.clave_paginacion;
-        if clave.is_none() {
+        if page.clave_paginacion.is_none() {
             return Err(EmitError::Transport {
                 detail: String::from(
                     "AEAT signaled more pages (IndicadorPaginacion=S) without a ClavePaginacion",
                 ),
             });
         }
+        clave = page.clave_paginacion;
     }
     Err(EmitError::Transport {
         detail: String::from("consulta exceeded 100 pages — a bug class, never an input"),
@@ -641,8 +612,8 @@ pub struct EncadenamientoSpec {
 fn render_registro(out: &mut String, registro: &RegistroSpec) {
     // The element NAME is RespuestaConsultaLR.xsd's declaration; the
     // DatosRegistroFacturacion children are declared there too (its
-    // type is RC-local), so they carry sfRC — only the
-    // RegistroAnterior's children ride the SI-named
+    // type is RC-local), so they carry sfRC — RegistroAnterior
+    // included; only ITS children ride the SI-named
     // EncadenamientoFacturaAnteriorType.
     out.push_str("<sfRC:RegistroRespuestaConsultaFactuSistemaFacturacion>");
     out.push_str("<sfRC:IDFactura>");
@@ -676,7 +647,7 @@ fn render_registro(out: &mut String, registro: &RegistroSpec) {
     match &registro.huella_previa {
         None => out.push_str("<sfRC:PrimerRegistro>S</sfRC:PrimerRegistro>"),
         Some(anterior) => {
-            out.push_str("<sum1:RegistroAnterior>");
+            out.push_str("<sfRC:RegistroAnterior>");
             tag(out, "sum1:IDEmisorFactura", &registro.id_emisor_factura);
             tag(out, "sum1:NumSerieFactura", &anterior.num_serie_factura);
             tag(
@@ -685,7 +656,7 @@ fn render_registro(out: &mut String, registro: &RegistroSpec) {
                 &anterior.fecha_expedicion_factura,
             );
             tag(out, "sum1:Huella", &anterior.huella);
-            out.push_str("</sum1:RegistroAnterior>");
+            out.push_str("</sfRC:RegistroAnterior>");
         }
     }
     out.push_str("</sfRC:Encadenamiento>");
@@ -742,14 +713,7 @@ pub fn consulta_response_document(spec: &ConsultaSpec) -> String {
         "sfRC:IndicadorPaginacion",
         if spec.paginacion_pendiente { "S" } else { "N" },
     );
-    tag(
-        &mut out,
-        "sfRC:ResultadoConsulta",
-        match spec.resultado {
-            ResultadoConsulta::ConDatos => "ConDatos",
-            ResultadoConsulta::SinDatos => "SinDatos",
-        },
-    );
+    tag(&mut out, "sfRC:ResultadoConsulta", spec.resultado.as_str());
     for registro in &spec.registros {
         render_registro(&mut out, registro);
     }
@@ -837,7 +801,7 @@ mod tests {
             clave_paginacion: None,
         })
         .expect_err("an empty NumSerieFactura narrows nothing legally");
-        assert!(error.to_string().contains("minLength 1"));
+        assert!(error.to_string().contains("1..=60"), "{error}");
     }
 
     /// The anulado's thinner echo — every optional field absent, the

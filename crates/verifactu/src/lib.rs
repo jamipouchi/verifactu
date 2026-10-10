@@ -58,7 +58,6 @@
 //!   mtls-certificate upload` + an `mtls_certificates` binding,
 //!   dialed at [`endpoint_table`]). workers-rs has no typed accessor
 //!   for it yet; `env.service("AEAT_CERT")` retrieves the `Fetcher`.
-//!   The in-repo `examples/cloudflare-worker` is the reference wiring.
 //!
 //! # Features
 //!
@@ -100,10 +99,7 @@ use std::time::Duration;
 use crate::clock::{Clock, SystemClock};
 use crate::domain::chain::ChainRecord;
 use crate::fiscal::huso;
-use crate::fiscal::signer::XadesRecordSigner;
-use crate::fiscal::{
-    consulta, EmissionContext, Representante, SiNo, SistemaInformaticoConfig, VerifactuEmitter,
-};
+use crate::fiscal::{consulta, EmissionContext, SiNo, SistemaInformaticoConfig, VerifactuEmitter};
 
 #[cfg(feature = "http")]
 use crate::aeat::HttpVerifactuTransport;
@@ -161,13 +157,14 @@ pub mod engine {
     pub use crate::cancel_draft;
     pub use crate::clock::zone::SiteZone;
     pub use crate::clock::{Clock, FakeClock, SystemClock, Timestamp};
-    pub use crate::domain::chain::{ChainKind, ChainRecord, EventData, Predecessor, PrevRef};
+    pub use crate::domain::chain::{
+        huella, verify_chain, ChainBreak, ChainKind, ChainRecord, EventData, Predecessor, PrevRef,
+    };
     pub use crate::emit_draft;
     pub use crate::fiscal::consulta;
     pub use crate::fiscal::events;
     pub use crate::fiscal::huso;
     pub use crate::fiscal::response;
-    pub use crate::fiscal::signer::{FakeSigner, RecordSigner, XadesRecordSigner};
     pub use crate::fiscal::transport;
     pub use crate::fiscal::transport::{
         FakeVerifactuTransport, ScriptedLine, ScriptedOutcome, TransportFailure, VerifactuTransport,
@@ -177,6 +174,7 @@ pub mod engine {
         EmissionContext, RechazoPrevio, Requerimiento, SiNo, SistemaInformaticoConfig,
         VerifactuEmitter,
     };
+    pub use crate::signer::FakeSigner;
     #[cfg(feature = "test-util")]
     pub use crate::wire::test_util;
     #[cfg(feature = "http")]
@@ -271,6 +269,23 @@ impl SifConfig {
             version: version.to_owned(),
         })
     }
+
+    /// The `SistemaInformatico` block one installation declares: the
+    /// SIF's producer is the obligado itself in both custody models.
+    fn for_installation(
+        &self,
+        obligado: &Obligado,
+        installation: &str,
+    ) -> SistemaInformaticoConfig {
+        SistemaInformaticoConfig {
+            nombre_razon: obligado.nombre_razon.clone(),
+            nif: obligado.nif.clone(),
+            nombre_sistema_informatico: self.nombre_sistema_informatico.clone(),
+            id_sistema_informatico: self.id_sistema_informatico.clone(),
+            version: self.version.clone(),
+            numero_instalacion: installation.to_owned(),
+        }
+    }
 }
 
 /// The certificate input — two doors.
@@ -287,7 +302,7 @@ pub enum CertificateSource<'a> {
     #[cfg(feature = "http")]
     Parsed {
         identity: ClientIdentity,
-        signer: Arc<dyn FiscalSigner + Send + Sync>,
+        signer: Arc<dyn FiscalSigner>,
     },
     /// The bring-your-own door: the consumer supplies BOTH legs — its
     /// own `XAdES` signer and its own transport implementation (an edge
@@ -295,7 +310,7 @@ pub enum CertificateSource<'a> {
     /// The facade builds no HTTP stack for it; works with
     /// `default-features = false`.
     Custom {
-        signer: Arc<dyn FiscalSigner + Send + Sync>,
+        signer: Arc<dyn FiscalSigner>,
         transport: Arc<dyn VerifactuTransport>,
     },
 }
@@ -426,86 +441,70 @@ impl std::fmt::Debug for Verifactu {
 }
 
 /// What a [`CertificateSource`] resolves into: the `XAdES` signing leg
-/// plus whichever wire leg the source demands. Nothing survives
-/// `connect()` beyond these — no archive bytes, no password.
-enum CertLegs {
+/// plus the wire leg. Nothing survives `connect()` beyond these — no
+/// archive bytes, no password.
+struct CertLegs {
+    signer: Arc<dyn FiscalSigner>,
+    wire: WireLeg,
+}
+
+enum WireLeg {
     /// The provided HTTP transport, built per modality endpoint over
-    /// the parsed mTLS identity.
+    /// this mTLS identity.
     #[cfg(feature = "http")]
-    Http {
-        signer: Arc<dyn FiscalSigner + Send + Sync>,
-        identity: ClientIdentity,
-    },
-    /// Both legs injected by the consumer.
-    Custom {
-        signer: Arc<dyn FiscalSigner + Send + Sync>,
-        transport: Arc<dyn VerifactuTransport>,
-    },
+    Identity(ClientIdentity),
+    /// Injected by the consumer.
+    Transport(Arc<dyn VerifactuTransport>),
 }
 
 impl CertLegs {
-    fn signer(&self) -> Arc<dyn FiscalSigner + Send + Sync> {
-        match self {
+    fn of(clock: &Arc<dyn Clock>, cert: CertificateSource<'_>) -> Result<Self, VerifactuError> {
+        match cert {
+            CertificateSource::Pkcs12 { p12, password } => Self::pkcs12(clock, p12, password),
             #[cfg(feature = "http")]
-            Self::Http { signer, .. } => Arc::clone(signer),
-            Self::Custom { signer, .. } => Arc::clone(signer),
+            CertificateSource::Parsed { identity, signer } => Ok(Self {
+                signer,
+                wire: WireLeg::Identity(identity),
+            }),
+            CertificateSource::Custom { signer, transport } => Ok(Self {
+                signer,
+                wire: WireLeg::Transport(transport),
+            }),
         }
     }
-}
 
-#[cfg(all(feature = "http", feature = "signing"))]
-fn pkcs12_legs(
-    clock: &Arc<dyn Clock>,
-    p12: &[u8],
-    password: &str,
-) -> Result<CertLegs, VerifactuError> {
-    // The SAME injected clock drives the emission instants AND the
-    // XAdES signing time — a frozen clock reproduces byte-identical
-    // signed emissions.
-    let signer =
-        crate::xades::XadesSigner::from_pkcs12(Arc::clone(clock), p12, password).map_err(|_| {
+    #[cfg(all(feature = "http", feature = "signing"))]
+    fn pkcs12(clock: &Arc<dyn Clock>, p12: &[u8], password: &str) -> Result<Self, VerifactuError> {
+        // The SAME injected clock drives the emission instants AND the
+        // XAdES signing time — a frozen clock reproduces byte-identical
+        // signed emissions.
+        let signer = crate::xades::XadesSigner::from_pkcs12(Arc::clone(clock), p12, password)
+            .map_err(|_| {
+                VerifactuError::Certificate(
+                    "the archive does not load as a signing key (wrong password?)",
+                )
+            })?;
+        let identity = crate::aeat::p12::identity_from_pkcs12(p12, password).map_err(|_| {
             VerifactuError::Certificate(
-                "the archive does not load as a signing key (wrong password?)",
+                "the archive does not load as a TLS identity (no key/certificate?)",
             )
         })?;
-    let identity = crate::aeat::p12::identity_from_pkcs12(p12, password).map_err(|_| {
-        VerifactuError::Certificate(
-            "the archive does not load as a TLS identity (no key/certificate?)",
-        )
-    })?;
-    Ok(CertLegs::Http {
-        signer: Arc::new(signer),
-        identity,
-    })
-}
+        Ok(Self {
+            signer: Arc::new(signer),
+            wire: WireLeg::Identity(identity),
+        })
+    }
 
-#[cfg(not(all(feature = "http", feature = "signing")))]
-fn pkcs12_legs(
-    _clock: &Arc<dyn Clock>,
-    _p12: &[u8],
-    _password: &str,
-) -> Result<CertLegs, VerifactuError> {
-    Err(VerifactuError::Certificate(
-        "the Pkcs12 door demands the http + signing features — enable them, or supply \
-         both legs via CertificateSource::Custom",
-    ))
-}
-
-fn legs_of(
-    clock: &Arc<dyn Clock>,
-    cert: &CertificateSource<'_>,
-) -> Result<CertLegs, VerifactuError> {
-    match cert {
-        CertificateSource::Pkcs12 { p12, password } => pkcs12_legs(clock, p12, password),
-        #[cfg(feature = "http")]
-        CertificateSource::Parsed { identity, signer } => Ok(CertLegs::Http {
-            signer: Arc::clone(signer),
-            identity: ClientIdentity::new(identity.chain().to_vec(), identity.key()),
-        }),
-        CertificateSource::Custom { signer, transport } => Ok(CertLegs::Custom {
-            signer: Arc::clone(signer),
-            transport: Arc::clone(transport),
-        }),
+    #[cfg(not(all(feature = "http", feature = "signing")))]
+    fn pkcs12(
+        _clock: &Arc<dyn Clock>,
+        _p12: &[u8],
+        _password: &str,
+    ) -> Result<Self, VerifactuError> {
+        Err(VerifactuError::Certificate(
+            "the Pkcs12 door demands the http + signing features — enable them, or supply \
+             both legs via CertificateSource::Custom",
+        ))
     }
 }
 
@@ -522,29 +521,30 @@ impl Verifactu {
         self.environment
     }
 
-    /// No network traffic happens here.
-    #[cfg(feature = "http")]
+    /// The modality's transport over the wire leg. No network traffic
+    /// happens here.
+    #[cfg_attr(
+        not(feature = "http"),
+        allow(clippy::unused_self, clippy::unnecessary_wraps, unused_variables)
+    )]
     fn transport_of(
         &self,
-        legs: &CertLegs,
+        wire: WireLeg,
         modality: Modality,
     ) -> Result<Arc<dyn VerifactuTransport>, VerifactuError> {
-        match legs {
-            CertLegs::Http { identity, .. } => {
-                let table = endpoint_table(self.cert_family, self.environment);
+        match wire {
+            #[cfg(feature = "http")]
+            WireLeg::Identity(identity) => {
+                let (remission, requerimiento) = endpoint_table(self.cert_family, self.environment);
                 let endpoint = match modality {
-                    Modality::Remission => table.0,
-                    Modality::Conservation => table.1,
+                    Modality::Remission => remission,
+                    Modality::Conservation => requerimiento,
                 };
                 let transport = HttpVerifactuTransport::new(endpoint, self.timeout)?
-                    .with_client_identity(ClientIdentity::new(
-                        identity.chain().to_vec(),
-                        identity.key(),
-                    ))
-                    .map_err(VerifactuError::from)?;
+                    .with_client_identity(identity)?;
                 Ok(Arc::new(transport))
             }
-            CertLegs::Custom { transport, .. } => Ok(Arc::clone(transport)),
+            WireLeg::Transport(transport) => Ok(transport),
         }
     }
 
@@ -632,30 +632,16 @@ impl TenantConnecting<'_, '_> {
         let obligado = self.obligado.ok_or_else(|| {
             VerifactuError::Identity(String::from("the tenant obligado is required"))
         })?;
-        let legs = legs_of(&self.root.clock, &self.cert)?;
-        #[cfg(feature = "http")]
-        let transport = self.root.transport_of(&legs, self.modality)?;
-        #[cfg(not(feature = "http"))]
-        let transport = match &legs {
-            CertLegs::Custom { transport, .. } => Arc::clone(transport),
-        };
-        let sif = SistemaInformaticoConfig {
-            nombre_razon: obligado.nombre_razon.clone(),
-            nif: obligado.nif.clone(),
-            nombre_sistema_informatico: self.root.sif.nombre_sistema_informatico.clone(),
-            id_sistema_informatico: self.root.sif.id_sistema_informatico.clone(),
-            version: self.root.sif.version.clone(),
-            numero_instalacion: self.installation,
-        };
-        let emitter = VerifactuEmitter::new(
-            self.modality,
-            obligado,
-            sif,
-            Arc::new(XadesRecordSigner::new(legs.signer())),
-        )
-        .map_err(|error| VerifactuError::Identity(error.to_string()))?
-        .with_clock(Arc::clone(&self.root.clock))
-        .with_transport(transport);
+        let legs = CertLegs::of(&self.root.clock, self.cert)?;
+        let transport = self.root.transport_of(legs.wire, self.modality)?;
+        let sif = self
+            .root
+            .sif
+            .for_installation(&obligado, &self.installation);
+        let emitter = VerifactuEmitter::new(self.modality, obligado, sif, legs.signer)
+            .map_err(|error| VerifactuError::Identity(error.to_string()))?
+            .with_clock(Arc::clone(&self.root.clock))
+            .with_transport(transport);
         Ok(TenantVerifactu { emitter })
     }
 }
@@ -756,15 +742,10 @@ impl VendorConnecting<'_, '_> {
                 "the vendor model demands the representante (the Cabecera block names us)",
             ))
         })?;
-        let legs = legs_of(&self.root.clock, &self.cert)?;
-        #[cfg(feature = "http")]
-        let transport = self.root.transport_of(&legs, Modality::Remission)?;
-        #[cfg(not(feature = "http"))]
-        let transport = match &legs {
-            CertLegs::Custom { transport, .. } => Arc::clone(transport),
-        };
+        let legs = CertLegs::of(&self.root.clock, self.cert)?;
+        let transport = self.root.transport_of(legs.wire, Modality::Remission)?;
         Ok(VendorVerifactu {
-            signer: legs.signer(),
+            signer: legs.signer,
             transport,
             representante,
             sif: self.root.sif.clone(),
@@ -776,7 +757,7 @@ impl VendorConnecting<'_, '_> {
 
 /// The vendor connection: one certificate, one pool, every tenant.
 pub struct VendorVerifactu {
-    signer: Arc<dyn FiscalSigner + Send + Sync>,
+    signer: Arc<dyn FiscalSigner>,
     transport: Arc<dyn VerifactuTransport>,
     representante: Obligado,
     sif: SifConfig,
@@ -813,28 +794,14 @@ impl VendorVerifactu {
         if let Some(emitter) = self.emitters.read().expect("emitter cache lock").get(&key) {
             return Ok(Arc::clone(emitter));
         }
-        let sif = SistemaInformaticoConfig {
-            nombre_razon: tenant.nombre_razon.clone(),
-            nif: tenant.nif.clone(),
-            nombre_sistema_informatico: self.sif.nombre_sistema_informatico.clone(),
-            id_sistema_informatico: self.sif.id_sistema_informatico.clone(),
-            version: self.sif.version.clone(),
-            numero_instalacion: installation.to_owned(),
-        };
         let emitter = VerifactuEmitter::new(
             modality,
-            Obligado {
-                nombre_razon: tenant.nombre_razon.clone(),
-                nif: tenant.nif.clone(),
-            },
-            sif,
-            Arc::new(XadesRecordSigner::new(Arc::clone(&self.signer))),
+            tenant.clone(),
+            self.sif.for_installation(tenant, installation),
+            Arc::clone(&self.signer),
         )?
         .with_clock(Arc::clone(&self.clock))
-        .with_representante(Representante {
-            nombre_razon: self.representante.nombre_razon.clone(),
-            nif: self.representante.nif.clone(),
-        })?
+        .with_representante(self.representante.clone())?
         .with_transport(Arc::clone(&self.transport));
         let emitter = Arc::new(emitter);
         self.emitters
@@ -848,8 +815,8 @@ impl VendorVerifactu {
     /// [`TenantVerifactu::emit_invoice`], including the retry law).
     ///
     /// # Errors
-    /// [`VerifactuError::Emitter`] on emitter construction;
-    /// [`EmitError`] from the emission itself.
+    /// [`EmitError::InvalidRecord`] when the tenant identity is
+    /// off-contract; the rest of [`EmitError`] from the emission itself.
     pub async fn emit_invoice_for(
         &self,
         tenant: &Obligado,
@@ -866,8 +833,8 @@ impl VendorVerifactu {
     /// [`TenantVerifactu::cancel_invoice`]).
     ///
     /// # Errors
-    /// [`VerifactuError::Emitter`] on emitter construction;
-    /// [`EmitError`] from the emission itself.
+    /// [`EmitError::InvalidRecord`] when the tenant identity is
+    /// off-contract; the rest of [`EmitError`] from the emission itself.
     pub async fn cancel_invoice_for(
         &self,
         tenant: &Obligado,
@@ -1097,42 +1064,39 @@ impl InvoiceDraft {
         self
     }
 
-    /// Validates the draft and computes the record's kind — the
-    /// facade's one construction law (totals from the lines, macrodato
-    /// at the threshold, instants from `now`, dates at the site
-    /// zone). Everything returns OWNED; only [`emit_draft`]'s single
-    /// scope holds the context's borrows (no leaks, by design). The
-    /// issuer is the emitter's obligado NIF — never a second copy that
-    /// could disagree.
-    /// The serie/number simple-type gates (`NumSerieFactura` is
-    /// `TextMax20` over prefix + 8 digits).
+    /// The serie/number gates, answering the rendered
+    /// `NumSerieFactura`: the correlative renders 8 digits, a custom
+    /// prefix is named, and the rendering meets its wire law.
     ///
     /// # Errors
     /// [`EmitError::InvalidRecord`] naming the broken bound.
-    fn check_serie(serie: &Series, number: u64) -> Result<(), EmitError> {
-        let invalid = |detail: String| EmitError::InvalidRecord { detail };
-        if number > 99_999_999 {
-            return Err(invalid(String::from(
-                "the correlative is 1..=99_999_999 — a gapless series cannot reach a \
-                 9-digit correlative (NumSerieFactura renders 8)",
-            )));
+    fn num_serie(serie: &Series, number: u64) -> Result<String, EmitError> {
+        let invalid = |detail: &str| EmitError::InvalidRecord {
+            detail: detail.to_owned(),
+        };
+        let Some(num_serie) = crate::domain::series::checked_format(serie, number) else {
+            return Err(invalid(
+                "the correlative is 1..=99_999_999 — a gapless series cannot reach a 9-digit \
+                 correlative (NumSerieFactura renders 8)",
+            ));
+        };
+        if matches!(serie, Series::Custom(prefix) if prefix.is_empty()) {
+            return Err(invalid(
+                "a custom series prefix is required (the builtin prefixes are T/F/R)",
+            ));
         }
-        if let Series::Custom(prefix) = serie {
-            if prefix.is_empty() {
-                return Err(invalid(String::from(
-                    "a custom series prefix is required (the builtin prefixes are T/F/R)",
-                )));
-            }
-            if prefix.chars().count() > 12 {
-                return Err(invalid(String::from(
-                    "a custom series prefix is 1..=12 chars (NumSerieFactura is TextMax20 \
-                     over prefix + 8 digits)",
-                )));
-            }
-        }
-        Ok(())
+        crate::fiscal::xml::check_num_serie("NumSerieFactura", &num_serie)?;
+        Ok(num_serie)
     }
 
+    /// Validates the draft into what [`emit_draft`] seals — the facade's
+    /// one construction law: totals from the lines, macrodato at the
+    /// threshold, instants from `now`, dates at the site zone. The
+    /// issuer is the emitter's obligado NIF — never a second copy that
+    /// could disagree.
+    ///
+    /// # Errors
+    /// [`EmitError::InvalidRecord`] naming the broken law.
     fn build(self, issuer: &str, now: u64) -> Result<Built, EmitError> {
         let invalid = |detail: String| EmitError::InvalidRecord { detail };
         let Some((serie, number)) = self.serie else {
@@ -1140,66 +1104,47 @@ impl InvoiceDraft {
                 "the invoice's serie and number are required",
             )));
         };
-        Self::check_serie(&serie, number)?;
-        let Some(descripcion) = self.descripcion else {
+        let num_serie = Self::num_serie(&serie, number)?;
+        let Some(descripcion) = self.descripcion.filter(|text| !text.is_empty()) else {
             return Err(invalid(String::from(
                 "the invoice's description is required",
             )));
         };
-        if descripcion.is_empty() {
-            return Err(invalid(String::from(
-                "the invoice's description is required",
-            )));
-        }
         if self.lines.is_empty() {
             return Err(invalid(String::from(
                 "at least one desglose line is required",
             )));
         }
-        // `.tipo` wins whenever named — the eager-match class this
-        // replaces rejected custom series EVEN with a named tipo.
-        let tipo = match self.tipo {
-            Some(tipo) => tipo,
-            None => match &serie {
-                Series::T => TipoFactura::F2,
-                Series::F | Series::R => TipoFactura::F1,
-                Series::Custom(_) => {
-                    return Err(invalid(String::from(
-                        "a custom series carries no default TipoFactura — name it (.tipo(..))",
-                    )));
-                }
-            },
+        let tipo = match (self.tipo, &serie) {
+            (Some(tipo), _) => tipo,
+            (None, Series::T) => TipoFactura::F2,
+            (None, Series::F | Series::R) => TipoFactura::F1,
+            (None, Series::Custom(_)) => {
+                return Err(invalid(String::from(
+                    "a custom series carries no default TipoFactura — name it (.tipo(..))",
+                )));
+            }
         };
-        // AEAT 1189: F1/F3/R1–R4 carry their counterparty.
-        if matches!(
-            tipo,
-            TipoFactura::F1
-                | TipoFactura::F3
-                | TipoFactura::R1
-                | TipoFactura::R2
-                | TipoFactura::R3
-                | TipoFactura::R4
-        ) && self.destinatarios.is_empty()
-        {
+        if tipo.requires_destinatario() && self.destinatarios.is_empty() {
             return Err(invalid(format!(
                 "TipoFactura {tipo:?} requires its destinatario (AEAT 1189)"
             )));
         }
         // Totals cohere by construction: Σ cuotas (incl. recargo) and
         // Σ base + Σ cuotas.
-        let mut cuota_total = 0_i64;
-        let mut base_total = 0_i64;
-        for line in &self.lines {
-            base_total += line.base_imponible.as_cents();
-            if let Some(cuota) = line.cuota_repercutida {
-                cuota_total += cuota.as_cents();
-            }
-            if let Some(recargo) = line.cuota_recargo_equivalencia {
-                cuota_total += recargo.as_cents();
-            }
-        }
+        let base_total: i64 = self
+            .lines
+            .iter()
+            .map(|line| line.base_imponible.as_cents())
+            .sum();
+        let cuota_total: i64 = self
+            .lines
+            .iter()
+            .flat_map(|line| [line.cuota_repercutida, line.cuota_recargo_equivalencia])
+            .flatten()
+            .map(Money::as_cents)
+            .sum();
         let importe_total = base_total + cuota_total;
-        let macrodato = i64::abs(importe_total) >= 10_000_000_000;
 
         let instants = huso::render_instants(crate::clock::zone::SiteZone::EuropeMadrid, now);
         let kind = ChainKind::Alta {
@@ -1216,20 +1161,25 @@ impl InvoiceDraft {
         };
         Ok(Built {
             kind,
-            now,
+            num_serie,
             descripcion,
             lines: self.lines,
             destinatarios: self.destinatarios,
             rectificativa: self.rectificativa,
             ref_externa: self.ref_externa,
-            macrodato,
+            macrodato: importe_total.abs() >= MACRODATO_CENTS,
         })
     }
 }
 
+/// `Macrodato=S` from an `ImporteTotal` of 100 M€ (AEAT's threshold).
+const MACRODATO_CENTS: i64 = 10_000_000_000;
+
+/// A validated draft: the alta's kind plus everything its emission
+/// context borrows.
 struct Built {
     kind: ChainKind,
-    now: u64,
+    num_serie: String,
     descripcion: String,
     lines: Vec<DetalleDesglose>,
     destinatarios: Vec<IDDestinatario>,
@@ -1327,21 +1277,11 @@ pub async fn emit_draft(
     prev: Option<&Predecessor>,
 ) -> Result<EmittedInvoice, EmitError> {
     let now = emitter.now_utc().0;
-    let built = draft.build(emitter.obligado_nif(), now)?;
-    let (serie, number) = match &built.kind {
-        ChainKind::Alta { serie, number, .. } | ChainKind::Anulacion { serie, number, .. } => {
-            (serie, *number)
-        }
-        ChainKind::Evento { .. } => unreachable!("a draft seals invoice kinds only"),
-    };
-    let num_serie = format_num_serie(serie, number);
-    let record = ChainRecord::seal(built.kind.clone(), built.now, prev);
-    let cursor = record.predecessor();
-    let no_facturas: Vec<FacturaId> = Vec::new();
+    let built = draft.build(&emitter.obligado().nif, now)?;
     let (tipo_rectificativa, facturas_rectificadas, importe_rectificacion) =
         match &built.rectificativa {
             Some((tipo, facturas, importe)) => (Some(*tipo), facturas.as_slice(), importe.clone()),
-            None => (None, no_facturas.as_slice(), None),
+            None => (None, &[][..], None),
         };
     let context = EmissionContext {
         ref_externa: built.ref_externa.as_deref(),
@@ -1351,20 +1291,10 @@ pub async fn emit_draft(
         facturas_rectificadas,
         importe_rectificacion,
         destinatarios: built.destinatarios.as_slice(),
-        macrodato: if built.macrodato {
-            Some(SiNo::Si)
-        } else {
-            None
-        },
+        macrodato: built.macrodato.then_some(SiNo::Si),
         ..EmissionContext::default()
     };
-    let emission = emitter.submit(&[(record, context)]).await?;
-    Ok(EmittedInvoice {
-        emission,
-        cursor,
-        kind: built.kind,
-        num_serie,
-    })
+    seal_and_submit(emitter, built.kind, now, prev, context, built.num_serie).await
 }
 
 /// The anulación-level emit over ANY emitter (the same testing seam as
@@ -1379,7 +1309,7 @@ pub async fn emit_draft(
 /// emission pipeline.
 ///
 /// # Panics
-/// Never on input: the date grammar renders come from `huso` itself.
+/// Never on input: the instant renders come from `huso` itself.
 pub async fn cancel_draft(
     emitter: &VerifactuEmitter,
     annulled: &Predecessor,
@@ -1388,6 +1318,12 @@ pub async fn cancel_draft(
     let Predecessor::Factura(invoice) = annulled else {
         return Err(EmitError::InvalidRecord {
             detail: String::from("only invoices are annullable — an event record is not"),
+        });
+    };
+    let Some(num_serie) = crate::domain::series::checked_format(&invoice.serie, invoice.number)
+    else {
+        return Err(EmitError::InvalidRecord {
+            detail: String::from("the annulled invoice's correlative exceeds 99_999_999"),
         });
     };
     let now = emitter.now_utc().0;
@@ -1400,12 +1336,30 @@ pub async fn cancel_draft(
         fecha_huso_gen: FechaHuso::parse(&instants.fecha_huso_gen)
             .expect("huso renders the ISO-8601 grammar"),
     };
-    let num_serie = format_num_serie(&invoice.serie, invoice.number);
+    seal_and_submit(
+        emitter,
+        kind,
+        now,
+        prev,
+        EmissionContext::default(),
+        num_serie,
+    )
+    .await
+}
+
+/// Seals `kind` onto `prev` at `now`, submits the one-record envío, and
+/// answers the emission with the sealed record's cursor.
+async fn seal_and_submit(
+    emitter: &VerifactuEmitter,
+    kind: ChainKind,
+    now: u64,
+    prev: Option<&Predecessor>,
+    context: EmissionContext<'_>,
+    num_serie: String,
+) -> Result<EmittedInvoice, EmitError> {
     let record = ChainRecord::seal(kind.clone(), now, prev);
     let cursor = record.predecessor();
-    let emission = emitter
-        .submit(&[(record, EmissionContext::default())])
-        .await?;
+    let emission = emitter.submit(&[(record, context)]).await?;
     Ok(EmittedInvoice {
         emission,
         cursor,
@@ -1821,7 +1775,7 @@ mod tests {
             csv: Some(String::from("1111222233334444")),
             tiempo_espera_envio: 60,
         });
-        let signer: std::sync::Arc<dyn FiscalSigner + Send + Sync> = fake_signer.clone();
+        let signer: std::sync::Arc<dyn FiscalSigner> = fake_signer.clone();
         let transport: std::sync::Arc<dyn VerifactuTransport> = fake_transport.clone();
 
         let tenant = root()
@@ -2038,9 +1992,24 @@ mod tests {
             ),
             (
                 InvoiceDraft::new()
-                    .serie(Series::parse("ABCDEFGHIJKLMNO"), 9)
-                    .descripcion("13-char custom prefix"),
-                "1..=12 chars",
+                    .serie(Series::parse(&"A".repeat(53)), 9)
+                    .descripcion("NumSerieFactura renders 61 chars")
+                    .line(lines::sujeta_iva(2100, 1_000)),
+                "1..=60",
+            ),
+            (
+                InvoiceDraft::new()
+                    .serie(Series::parse("FÁ"), 9)
+                    .descripcion("the printed QR admits ASCII only")
+                    .line(lines::sujeta_iva(2100, 1_000)),
+                "printable ASCII",
+            ),
+            (
+                InvoiceDraft::new()
+                    .serie(Series::parse(" F"), 9)
+                    .descripcion("the huella would trim the prefix")
+                    .line(lines::sujeta_iva(2100, 1_000)),
+                "edge whitespace",
             ),
             (
                 InvoiceDraft::new()
@@ -2051,7 +2020,11 @@ mod tests {
             ),
         ];
         for (draft, law) in cases {
-            assert!(gate(draft).contains(law), "the gate names its law");
+            let error = gate(draft);
+            assert!(
+                error.contains(law),
+                "the gate names its law ({law}): {error}"
+            );
         }
     }
 }

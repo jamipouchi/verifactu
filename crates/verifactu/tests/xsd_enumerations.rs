@@ -1,5 +1,5 @@
 //! `wire()` spellings must be exactly the SI.xsd enumerations — every
-//! variant, not just the ones the live bench's matrix exercises.
+//! variant, not just the ones a live run happens to exercise.
 
 use strum::IntoEnumIterator;
 
@@ -75,6 +75,21 @@ fn emission_vocabularies_wire_spellings_are_the_xsd_enumerations() {
             "{simple_type}: wire() spellings must be the SI.xsd enumeration set"
         );
     }
+}
+
+/// The `CodigoPais` gate is the schema's own `CountryType2` list, sorted
+/// for its binary search.
+#[test]
+fn the_codigo_pais_gate_is_the_xsd_country_enumeration() {
+    let gate: Vec<String> = verifactu::engine::xml::CODIGOS_PAIS
+        .iter()
+        .map(|code| (*code).to_owned())
+        .collect();
+    assert!(
+        gate.windows(2).all(|pair| pair[0] < pair[1]),
+        "sorted, no duplicates"
+    );
+    assert_eq!(gate, xsd_enumerations("CountryType2"));
 }
 
 /// `parse` is the exact inverse of `wire` over every closed vocabulary

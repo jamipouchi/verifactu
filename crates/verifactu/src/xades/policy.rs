@@ -1,6 +1,7 @@
 //! The `Veri*FACTU` AGE signature-policy profile: identifiers and
-//! digest values verbatim from the `contracts/aeat-verifactu/`
-//! snapshot, never from re-hashing live downloads.
+//! digest values verbatim from AEAT's signing specification (facts in
+//! `contracts/aeat-verifactu/SOURCES.md`), never from re-hashing live
+//! downloads.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PolicyHash {

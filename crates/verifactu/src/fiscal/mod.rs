@@ -1,26 +1,36 @@
-//! The `Veri*FACTU` emission engine. Called post-commit from the durable
-//! outbox — no external call ever rides inside the sale's transaction.
+//! The `Veri*FACTU` emission engine: the closed AEAT vocabularies, the
+//! emission context, and [`VerifactuEmitter`] — serialize, sign per the
+//! modality's policy, remit, classify.
 
 pub mod consulta;
 pub mod events;
 pub mod huso;
 pub mod response;
-pub mod signer;
 pub mod transport;
 pub mod xml;
 
 use std::sync::Arc;
 
+use strum::IntoEnumIterator;
+
 use crate::clock::{Clock, SystemClock, Timestamp};
 use crate::domain::chain::{ChainKind, ChainRecord, FechaExpedicion};
 use crate::domain::error::ErrorClass;
-use crate::signer::SignerError;
+use crate::domain::money::Money;
+use crate::signer::{FiscalSigner, SignerError};
 
-use crate::fiscal::signer::RecordSigner;
-use crate::fiscal::transport::{TransportOutcome, VerifactuTransport};
+use crate::fiscal::response::SoapFault;
+use crate::fiscal::transport::{TransportFailure, TransportOutcome, VerifactuTransport};
 
-/// Conservation exists for offline correctness: on WAN-down, records are
-/// created locally and remission queues in the outbox.
+/// The inverse of a vocabulary's `wire()`: the spec-owned spellings
+/// live only in the `wire` arms, so a parse can never re-spell them.
+fn parse_wire<E: IntoEnumIterator + Copy>(code: &str, wire: fn(E) -> &'static str) -> Option<E> {
+    E::iter().find(|&variant| wire(variant) == code)
+}
+
+/// Both are Veri*FACTU modalities: remission sends every record to AEAT
+/// as it is created; conservation keeps signed records locally and
+/// remits only bajo requerimiento.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Modality {
     Remission,
@@ -43,7 +53,7 @@ impl SiNo {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::EnumIter)]
 pub enum TipoRectificativa {
     Sustitutiva,
     Incremental,
@@ -61,11 +71,7 @@ impl TipoRectificativa {
     /// The inverse of [`Self::wire`] — `None` on an unknown code.
     #[must_use]
     pub fn parse(code: &str) -> Option<Self> {
-        match code {
-            "S" => Some(Self::Sustitutiva),
-            "I" => Some(Self::Incremental),
-            _ => None,
-        }
+        parse_wire(code, Self::wire)
     }
 }
 
@@ -91,13 +97,7 @@ impl Impuesto {
     /// The inverse of [`Self::wire`] — `None` on an unknown code.
     #[must_use]
     pub fn parse(code: &str) -> Option<Self> {
-        match code {
-            "01" => Some(Self::Iva),
-            "02" => Some(Self::Ipsi),
-            "03" => Some(Self::Igic),
-            "05" => Some(Self::Otros),
-            _ => None,
-        }
+        parse_wire(code, Self::wire)
     }
 }
 
@@ -126,31 +126,10 @@ pub enum ClaveRegimen {
 }
 
 impl ClaveRegimen {
-    /// The inverse of [`Self::wire`] over the closed 18-code set —
-    /// `None` on an unknown code.
+    /// The inverse of [`Self::wire`] — `None` on an unknown code.
     #[must_use]
     pub fn parse(code: &str) -> Option<Self> {
-        match code {
-            "01" => Some(Self::C01),
-            "02" => Some(Self::C02),
-            "03" => Some(Self::C03),
-            "04" => Some(Self::C04),
-            "05" => Some(Self::C05),
-            "06" => Some(Self::C06),
-            "07" => Some(Self::C07),
-            "08" => Some(Self::C08),
-            "09" => Some(Self::C09),
-            "10" => Some(Self::C10),
-            "11" => Some(Self::C11),
-            "14" => Some(Self::C14),
-            "15" => Some(Self::C15),
-            "17" => Some(Self::C17),
-            "18" => Some(Self::C18),
-            "19" => Some(Self::C19),
-            "20" => Some(Self::C20),
-            "21" => Some(Self::C21),
-            _ => None,
-        }
+        parse_wire(code, Self::wire)
     }
 
     #[must_use]
@@ -194,13 +173,7 @@ impl CalificacionOperacion {
     /// The inverse of [`Self::wire`] — `None` on an unknown code.
     #[must_use]
     pub fn parse(code: &str) -> Option<Self> {
-        match code {
-            "S1" => Some(Self::SujetaNoExenta),
-            "S2" => Some(Self::SujetaNoExentaInversion),
-            "N1" => Some(Self::NoSujetaOtras),
-            "N2" => Some(Self::NoSujetaLocalizacion),
-            _ => None,
-        }
+        parse_wire(code, Self::wire)
     }
 
     #[must_use]
@@ -230,17 +203,7 @@ impl OperacionExenta {
     /// The inverse of [`Self::wire`] — `None` on an unknown code.
     #[must_use]
     pub fn parse(code: &str) -> Option<Self> {
-        match code {
-            "E1" => Some(Self::E1),
-            "E2" => Some(Self::E2),
-            "E3" => Some(Self::E3),
-            "E4" => Some(Self::E4),
-            "E5" => Some(Self::E5),
-            "E6" => Some(Self::E6),
-            "E7" => Some(Self::E7),
-            "E8" => Some(Self::E8),
-            _ => None,
-        }
+        parse_wire(code, Self::wire)
     }
 
     #[must_use]
@@ -278,19 +241,11 @@ impl RechazoPrevio {
     }
 }
 
-/// One identity for both the `Cabecera`'s `ObligadoEmision` and the
-/// records' emisor.
+/// A named fiscal identity: the `Cabecera`'s `ObligadoEmision` (and
+/// the records' emisor), or its `Representante` — the same
+/// `PersonaFisicaJuridicaESType` shape.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Obligado {
-    pub nombre_razon: String,
-    pub nif: String,
-}
-
-/// The `Cabecera`'s optional `Representante`: per AEAT, only when the
-/// remitted records were generated by a representante/asesor of the
-/// obligado.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Representante {
     pub nombre_razon: String,
     pub nif: String,
 }
@@ -338,15 +293,7 @@ impl IdOtroType {
     /// The inverse of [`Self::wire`] — `None` on an unknown code.
     #[must_use]
     pub fn parse(code: &str) -> Option<Self> {
-        match code {
-            "02" => Some(Self::NifIva),
-            "03" => Some(Self::Pasaporte),
-            "04" => Some(Self::IdPaisResidencia),
-            "05" => Some(Self::CertificadoResidencia),
-            "06" => Some(Self::OtroDocumentoProbatorio),
-            "07" => Some(Self::NoCensado),
-            _ => None,
-        }
+        parse_wire(code, Self::wire)
     }
 
     #[must_use]
@@ -389,9 +336,9 @@ pub struct IDDestinatario {
 /// (AEAT Validaciones §3.6).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ImporteRectificacion {
-    pub base_rectificada: crate::domain::money::Money,
-    pub cuota_rectificada: crate::domain::money::Money,
-    pub cuota_recargo_rectificado: Option<crate::domain::money::Money>,
+    pub base_rectificada: Money,
+    pub cuota_rectificada: Money,
+    pub cuota_recargo_rectificado: Option<Money>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -401,11 +348,11 @@ pub struct DetalleDesglose {
     /// The `DetalleType` choice: exactly one of this / `operacion_exenta`.
     pub calificacion: Option<CalificacionOperacion>,
     pub operacion_exenta: Option<OperacionExenta>,
-    pub tipo_impositivo: Option<crate::domain::money::Money>,
-    pub base_imponible: crate::domain::money::Money,
-    pub cuota_repercutida: Option<crate::domain::money::Money>,
-    pub tipo_recargo_equivalencia: Option<crate::domain::money::Money>,
-    pub cuota_recargo_equivalencia: Option<crate::domain::money::Money>,
+    pub tipo_impositivo: Option<Money>,
+    pub base_imponible: Money,
+    pub cuota_repercutida: Option<Money>,
+    pub tipo_recargo_equivalencia: Option<Money>,
+    pub cuota_recargo_equivalencia: Option<Money>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -442,8 +389,8 @@ pub struct Emission {
     /// AEAT's CSV (16 chars) — store durably at alta time; not
     /// re-fetchable later.
     pub csv: Option<String>,
-    /// AEAT's mandated backpressure (seconds). NOT yet wired: production
-    /// drain pacing MUST gate on this value.
+    /// AEAT's mandated wait (seconds) before the next envío: the caller
+    /// paces its remissions on it — this crate never sleeps on its behalf.
     pub tiempo_espera_envio: u64,
     pub lineas: Vec<response::RespuestaLinea>,
     pub disposition: response::Disposition,
@@ -525,14 +472,37 @@ impl From<SignerError> for EmitError {
     }
 }
 
+/// A wire-leg failure is always the `Transient` class.
+impl From<TransportFailure> for EmitError {
+    fn from(failure: TransportFailure) -> Self {
+        Self::Transport {
+            detail: failure.detail,
+        }
+    }
+}
+
+impl From<SoapFault> for EmitError {
+    /// `env:Server` retries; every other fault code is the operator's.
+    fn from(fault: SoapFault) -> Self {
+        match response::classify_fault(&fault) {
+            ErrorClass::Transient => Self::FaultServer {
+                faultstring: fault.faultstring,
+            },
+            _ => Self::FaultClient {
+                faultstring: fault.faultstring,
+            },
+        }
+    }
+}
+
 /// No transport is legal (conservation keeps records local) but fails
 /// closed on any path that must remit.
 pub struct VerifactuEmitter {
     modality: Modality,
     obligado: Obligado,
-    representante: Option<Representante>,
+    representante: Option<Obligado>,
     sif: SistemaInformaticoConfig,
-    signer: Arc<dyn RecordSigner>,
+    signer: Arc<dyn FiscalSigner>,
     clock: Arc<dyn Clock>,
     transport: Option<Arc<dyn VerifactuTransport>>,
 }
@@ -551,45 +521,15 @@ impl std::fmt::Debug for VerifactuEmitter {
 impl VerifactuEmitter {
     /// The modality's signing policy (FS §2): conservation signs EVERY
     /// record; remission signs ONLY events (art. 3 RD 1007/2023).
-    #[must_use]
-    pub(crate) fn must_sign(modality: Modality, kind: &ChainKind) -> bool {
+    fn must_sign(modality: Modality, kind: &ChainKind) -> bool {
         matches!(kind, ChainKind::Evento { .. }) || modality == Modality::Conservation
     }
 
-    /// One source: the emitter's construction data, never a
-    /// caller-supplied copy that could disagree.
-    #[must_use]
-    pub fn obligado_nif(&self) -> &str {
-        &self.obligado.nif
-    }
-
-    /// The emitter's obligado whole — the consulta cabecera's identity.
+    /// The emitter's obligado — the one source of the records' issuer
+    /// and the consulta cabecera's identity.
     #[must_use]
     pub fn obligado(&self) -> &Obligado {
         &self.obligado
-    }
-
-    fn check_config(obligado: &Obligado, sif: &SistemaInformaticoConfig) -> Result<(), EmitError> {
-        let invalid = |detail: String| EmitError::InvalidRecord { detail };
-        xml::check_nif("Obligado/NIF", &obligado.nif)
-            .map_err(|error| invalid(error.to_string()))?;
-        xml::check_text("Obligado/NombreRazon", &obligado.nombre_razon, 120)
-            .map_err(|error| invalid(error.to_string()))?;
-        xml::check_nif("SIF/NIF", &sif.nif).map_err(|error| invalid(error.to_string()))?;
-        for (field, value, max) in [
-            ("SIF/NombreRazon", &sif.nombre_razon, 120usize),
-            (
-                "SIF/NombreSistemaInformatico",
-                &sif.nombre_sistema_informatico,
-                30,
-            ),
-            ("SIF/IdSistemaInformatico", &sif.id_sistema_informatico, 2),
-            ("SIF/Version", &sif.version, 50),
-            ("SIF/NumeroInstalacion", &sif.numero_instalacion, 100),
-        ] {
-            xml::check_text(field, value, max).map_err(|error| invalid(error.to_string()))?;
-        }
-        Ok(())
     }
 
     /// # Errors
@@ -599,9 +539,32 @@ impl VerifactuEmitter {
         modality: Modality,
         obligado: Obligado,
         sif: SistemaInformaticoConfig,
-        signer: Arc<dyn RecordSigner>,
+        signer: Arc<dyn FiscalSigner>,
     ) -> Result<Self, EmitError> {
-        Self::check_config(&obligado, &sif)?;
+        xml::check_nif("ObligadoEmision/NIF", &obligado.nif)?;
+        xml::check_text("ObligadoEmision/NombreRazon", &obligado.nombre_razon, 120)?;
+        xml::check_nif("SistemaInformatico/NIF", &sif.nif)?;
+        for (field, value, max) in [
+            ("SistemaInformatico/NombreRazon", &sif.nombre_razon, 120),
+            (
+                "SistemaInformatico/NombreSistemaInformatico",
+                &sif.nombre_sistema_informatico,
+                30,
+            ),
+            (
+                "SistemaInformatico/IdSistemaInformatico",
+                &sif.id_sistema_informatico,
+                2,
+            ),
+            ("SistemaInformatico/Version", &sif.version, 50),
+            (
+                "SistemaInformatico/NumeroInstalacion",
+                &sif.numero_instalacion,
+                100,
+            ),
+        ] {
+            xml::check_text(field, value, max)?;
+        }
         Ok(Self {
             modality,
             obligado,
@@ -628,6 +591,24 @@ impl VerifactuEmitter {
         self
     }
 
+    /// The Cabecera's `Representante`: who remits on the obligado's
+    /// behalf (per AEAT, only when a representante/asesor generated the
+    /// records).
+    ///
+    /// # Errors
+    /// [`EmitError::InvalidRecord`] when the representante violates its
+    /// SI.xsd simple types.
+    pub fn with_representante(mut self, representante: Obligado) -> Result<Self, EmitError> {
+        xml::check_nif("Representante/NIF", &representante.nif)?;
+        xml::check_text(
+            "Representante/NombreRazon",
+            &representante.nombre_razon,
+            120,
+        )?;
+        self.representante = Some(representante);
+        Ok(self)
+    }
+
     /// The emission instant source — the flat face's single read point
     /// (wasm builds have no `SystemTime`; they inject a runtime clock).
     #[must_use]
@@ -635,25 +616,13 @@ impl VerifactuEmitter {
         self.clock.now_utc()
     }
 
-    /// # Errors
-    /// [`EmitError::InvalidRecord`] when the representante violates its
-    /// SI.xsd simple types.
-    pub fn with_representante(mut self, representante: Representante) -> Result<Self, EmitError> {
-        let invalid = |detail: String| EmitError::InvalidRecord { detail };
-        xml::check_nif("Representante/NIF", &representante.nif)
-            .map_err(|error| invalid(error.to_string()))?;
-        xml::check_text(
-            "Representante/NombreRazon",
-            &representante.nombre_razon,
-            120,
-        )
-        .map_err(|error| invalid(error.to_string()))?;
-        self.representante = Some(representante);
-        Ok(self)
+    fn transport(&self) -> Result<&Arc<dyn VerifactuTransport>, EmitError> {
+        self.transport.as_ref().ok_or(EmitError::NotConfigured)
     }
-}
 
-impl VerifactuEmitter {
+    /// Serializes, signs per the modality's policy, and — when the
+    /// modality remits — sends one envío of 1..=1000 records.
+    ///
     /// # Errors
     /// [`EmitError`] for the failing pipeline stage.
     pub async fn submit(
@@ -668,10 +637,21 @@ impl VerifactuEmitter {
                 ),
             });
         }
-        if pairs.len() > 1
-            && pairs
-                .iter()
-                .any(|(record, _)| matches!(record.kind, ChainKind::Evento { .. }))
+        for (record, _) in pairs {
+            if !record.huella_recomputes() {
+                return Err(EmitError::InvalidRecord {
+                    detail: String::from("stored huella does not recompute over the cadena"),
+                });
+            }
+        }
+        if let [(record, context)] = pairs {
+            if let ChainKind::Evento { .. } = &record.kind {
+                return self.emit_evento(record, context);
+            }
+        }
+        if pairs
+            .iter()
+            .any(|(record, _)| matches!(record.kind, ChainKind::Evento { .. }))
         {
             return Err(EmitError::InvalidRecord {
                 detail: String::from(
@@ -679,23 +659,13 @@ impl VerifactuEmitter {
                 ),
             });
         }
-        let requerimientos: Vec<&Requerimiento> = pairs
-            .iter()
-            .filter_map(|(_, context)| context.requerimiento.as_ref())
-            .collect();
-        Self::check_requerimientos(&requerimientos)?;
-
-        if let [(record, context)] = pairs {
-            if let ChainKind::Evento { .. } = &record.kind {
-                return self.emit_evento(record, context);
-            }
-        }
+        let requerimiento = Self::requerimiento_of(pairs)?;
 
         let signed_records = self.serialize_and_sign(pairs)?;
 
         let remision = match self.modality {
             Modality::Conservation => {
-                let Some(requerimiento) = requerimientos.first() else {
+                let Some(requerimiento) = requerimiento else {
                     return Ok(Emission::kept_local(signed_records));
                 };
                 xml::CabeceraRemision::Requerimiento {
@@ -708,32 +678,19 @@ impl VerifactuEmitter {
             },
         };
 
-        let Some(transport) = self.transport.as_ref() else {
-            return Err(EmitError::NotConfigured);
-        };
-        let body = xml::reg_factu_document_full(
+        let transport = self.transport()?;
+        let body = xml::reg_factu_document(
             &self.obligado,
             self.representante.as_ref(),
             &remision,
             &signed_records,
         )?;
-        let envelope = xml::soap_envelope(&body);
-        match transport.send(&envelope).await {
-            Err(failure) => Err(EmitError::Transport {
-                detail: failure.detail,
-            }),
-            Ok(TransportOutcome::Fault(fault)) => Err(match response::classify_fault(&fault) {
-                ErrorClass::Transient => EmitError::FaultServer {
-                    faultstring: fault.faultstring,
-                },
-                _ => EmitError::FaultClient {
-                    faultstring: fault.faultstring,
-                },
-            }),
-            Ok(TransportOutcome::Consulta(_)) => Err(EmitError::Transport {
+        match transport.send(&xml::soap_envelope(&body)).await? {
+            TransportOutcome::Fault(fault) => Err(fault.into()),
+            TransportOutcome::Consulta(_) => Err(EmitError::Transport {
                 detail: String::from("AEAT answered a consulta respuesta to a submission"),
             }),
-            Ok(TransportOutcome::Response(respuesta)) => {
+            TransportOutcome::Response(respuesta) => {
                 let disposition = response::classify_response(&respuesta);
                 Ok(Emission {
                     signed_records,
@@ -757,10 +714,7 @@ impl VerifactuEmitter {
         &self,
         filtro: &consulta::ConsultaFilter<'_>,
     ) -> Result<consulta::ConsultaAnswer, EmitError> {
-        let Some(transport) = self.transport.as_ref() else {
-            return Err(EmitError::NotConfigured);
-        };
-        consulta::send_all(transport, &self.obligado, false, filtro).await
+        consulta::send_all(self.transport()?, &self.obligado, false, filtro).await
     }
 
     /// The raw single-page door (the engine face): the request names
@@ -774,51 +728,49 @@ impl VerifactuEmitter {
         &self,
         request: &consulta::ConsultaRequest<'_>,
     ) -> Result<consulta::ConsultaAnswer, EmitError> {
-        let Some(transport) = self.transport.as_ref() else {
-            return Err(EmitError::NotConfigured);
-        };
-        consulta::send_once(transport, request).await
+        consulta::send_once(self.transport()?, request).await
     }
 
+    /// The one requerimiento the envío answers, if any.
+    ///
     /// # Errors
-    /// [`EmitError::InvalidRecord`] when a reference is not 1..18
-    /// alphanumeric (AEAT validation 4133, live-confirmed 2026-10-05: a
-    /// hyphen reached pruebas and was rejected `env:Client` — an
+    /// [`EmitError::InvalidRecord`] when the modality forbids a
+    /// requerimiento (remission remits voluntarily), a reference is not
+    /// 1..18 alphanumeric (AEAT validation 4133, live-confirmed
+    /// 2026-10-05: a hyphen was rejected `env:Client` — an
     /// application-level rule beyond the XSD), or one envío carries two
     /// different requerimientos.
-    fn check_requerimientos(requerimientos: &[&Requerimiento]) -> Result<(), EmitError> {
-        for requerimiento in requerimientos {
-            if requerimiento.referencia.is_empty() || requerimiento.referencia.chars().count() > 18
+    fn requerimiento_of<'p>(
+        pairs: &'p [(ChainRecord, EmissionContext<'_>)],
+    ) -> Result<Option<&'p Requerimiento>, EmitError> {
+        let mut found: Option<&Requerimiento> = None;
+        for requerimiento in pairs
+            .iter()
+            .filter_map(|(_, ctx)| ctx.requerimiento.as_ref())
+        {
+            let referencia = &requerimiento.referencia;
+            if referencia.is_empty()
+                || referencia.len() > 18
+                || !referencia.chars().all(|c| c.is_ascii_alphanumeric())
             {
                 return Err(EmitError::InvalidRecord {
                     detail: format!(
-                        "RefRequerimiento must be 1..18 chars (TextMax18), got {:?}",
-                        requerimiento.referencia
+                        "RefRequerimiento must be 1..18 ASCII alphanumerics (TextMax18, AEAT \
+                         4133), got {referencia:?}"
                     ),
                 });
             }
-            if !requerimiento
-                .referencia
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric())
-            {
+            if found.is_some_and(|first| first != requerimiento) {
                 return Err(EmitError::InvalidRecord {
-                    detail: format!(
-                        "RefRequerimiento must be alphanumeric (AEAT 4133), got {:?}",
-                        requerimiento.referencia
+                    detail: String::from(
+                        "one envío answers one requerimiento — all contexts must carry the same \
+                         RefRequerimiento/FinRequerimiento",
                     ),
                 });
             }
+            found = Some(requerimiento);
         }
-        if requerimientos.len() > 1 && requerimientos.windows(2).any(|pair| pair[0] != pair[1]) {
-            return Err(EmitError::InvalidRecord {
-                detail: String::from(
-                    "one envío answers one requerimiento — all contexts must carry the same \
-                     RefRequerimiento/FinRequerimiento",
-                ),
-            });
-        }
-        Ok(())
+        Ok(found)
     }
 
     fn emit_evento(
@@ -827,9 +779,7 @@ impl VerifactuEmitter {
         context: &EmissionContext<'_>,
     ) -> Result<Emission, EmitError> {
         let ChainKind::Evento { event, .. } = &record.kind else {
-            return Err(EmitError::InvalidRecord {
-                detail: String::from("record kind is not Evento"),
-            });
+            unreachable!("submit dispatches only evento records here");
         };
         if context.requerimiento.is_some() {
             return Err(EmitError::InvalidRecord {
@@ -838,22 +788,17 @@ impl VerifactuEmitter {
                 ),
             });
         }
-        if !crate::fiscal::events::is_known_tipo_evento(&event.tipo_evento) {
+        if !events::is_known_tipo_evento(&event.tipo_evento) {
             return Err(EmitError::InvalidRecord {
                 detail: format!(
-                    "unknown TipoEvento {:?} — the vocabulary is law at the emit boundary \
-                     (L1E recovery; a typo must never enter the event chain)",
+                    "unknown TipoEvento {:?} — the vocabulary is closed at the emit boundary \
+                     (a typo must never enter the event chain)",
                     event.tipo_evento
                 ),
             });
         }
-        if record.huella != crate::domain::chain::huella(&record.cadena()) {
-            return Err(EmitError::InvalidRecord {
-                detail: String::from("stored huella does not recompute over the cadena"),
-            });
-        }
         let node = xml::evento_node(record, context)?;
-        let signed = self.signer.sign_record(&node)?;
+        let signed = self.signer.sign_xades_epes(&node)?;
         Ok(Emission::kept_local(vec![xml::registro_evento(&signed)]))
     }
 
@@ -863,11 +808,6 @@ impl VerifactuEmitter {
     ) -> Result<Vec<String>, EmitError> {
         let mut signed_records = Vec::with_capacity(pairs.len());
         for (record, context) in pairs {
-            if record.huella != crate::domain::chain::huella(&record.cadena()) {
-                return Err(EmitError::InvalidRecord {
-                    detail: String::from("stored huella does not recompute over the cadena"),
-                });
-            }
             if self.modality == Modality::Remission && context.requerimiento.is_some() {
                 return Err(EmitError::InvalidRecord {
                     detail: String::from(
@@ -885,7 +825,7 @@ impl VerifactuEmitter {
             }
             let unsigned = xml::record_node(record, context, &self.obligado, &self.sif)?;
             let signed = if Self::must_sign(self.modality, &record.kind) {
-                self.signer.sign_record(&unsigned)?
+                self.signer.sign_xades_epes(&unsigned)?
             } else {
                 unsigned
             };
@@ -965,9 +905,9 @@ pub(crate) mod tests_support {
 mod tests {
     use std::sync::Arc;
 
-    use super::signer::FakeSigner;
     use super::tests_support::{iva_super, obligado, primer_alta_record, sif, EMISSION_INSTANT};
-    use super::{DetalleDesglose, EmissionContext, Modality, VerifactuEmitter};
+    use super::{DetalleDesglose, EmissionContext, Modality, Obligado, VerifactuEmitter};
+    use crate::signer::FakeSigner;
 
     fn emitter(modality: Modality) -> VerifactuEmitter {
         VerifactuEmitter::new(modality, obligado(), sif(), Arc::new(FakeSigner::new()))
@@ -1012,7 +952,7 @@ mod tests {
     #[test]
     fn representante_is_gated_and_renders_in_the_xsd_order() {
         let error = emitter(Modality::Remission)
-            .with_representante(super::Representante {
+            .with_representante(Obligado {
                 nombre_razon: String::from("ASESOR EJEMPLO SL"),
                 nif: String::from("B8765432"),
             })
@@ -1025,9 +965,9 @@ mod tests {
         );
         let node = super::xml::record_node(&primer_alta_record(), &alta_ctx(), &obligado, &sif)
             .expect("serializes");
-        let doc = super::xml::reg_factu_document_full(
+        let doc = super::xml::reg_factu_document(
             &obligado,
-            Some(&super::Representante {
+            Some(&Obligado {
                 nombre_razon: String::from("ASESOR EJEMPLO SL"),
                 nif: String::from("B87654321"),
             }),
@@ -1044,10 +984,5 @@ mod tests {
             obligado_at < repr_at && repr_at < remision_at,
             "the SI.xsd order: {doc}"
         );
-    }
-
-    #[allow(dead_code)]
-    fn _seam() {
-        let _ = super::transport::FakeVerifactuTransport::new();
     }
 }
