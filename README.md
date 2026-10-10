@@ -76,6 +76,16 @@ tree is compiled. `endpoint_table` still names the URLs your
 transport dials, and `engine::transport::parse_soap_answer` is the
 read edge it should hand the raw answer body to.
 
+### Ledger owners: the `engine` face
+
+Consumers that keep their own durable chain seal records themselves
+(`engine::ChainRecord::seal`) and submit them in envíos of up to 1000
+through `engine::VerifactuEmitter::submit`; `engine::verify_chain`
+audits a stored chain (every huella recomputes, every record sealed onto
+the one before). One signing port serves both faces: `FiscalSigner`,
+implemented by `engine::XadesSigner`, `engine::FakeSigner`, or your own
+KMS/HSM signer.
+
 ### Edge runtimes (wasm32: Cloudflare Workers and kin)
 
 - `default-features = false` compiles no host HTTP stack and no
@@ -92,20 +102,23 @@ read edge it should hand the raw answer body to.
 
 ```sh
 cargo build            # default features: http + signing
-cargo test             # the test lattice
+cargo test --all-features
 ```
+
+`AGENTS.md` holds the full gate (fmt, clippy over every feature set,
+the test matrix) and how the crate is tested.
 
 The `signing` feature rides the
 [bergshamra](https://github.com/kushaldas/bergshamra) XML-security
 family and the uppsala XML parser, both from crates.io pinned at exact
-(`=`) versions. Nothing is vendored: the first build resolves the
-index from the network, and every build after uses your local cargo
-registry cache.
+(`=`) versions. The first build resolves the index from the network;
+every build after uses your local cargo registry cache.
 
-`fixtures/xades/` and
-`contracts/aeat-verifactu/SuministroInformacion.xsd` are test
-fixtures — certificate archives for the PKCS#12 unit tests and the
-official SI.xsd the enumeration test pins — not runtime data.
+`contracts/aeat-verifactu/` holds AEAT's official schemas and WSDL —
+the tests validate every generated envío, consulta and fake answer
+against them — and `SOURCES.md`, the provenance and transcribed facts
+of every AEAT document the crate implements. `fixtures/xades/` holds
+the signing test keys and golden vectors. None of it is runtime data.
 
 ## License
 
