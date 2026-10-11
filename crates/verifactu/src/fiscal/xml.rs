@@ -251,6 +251,25 @@ pub(crate) fn check_text(
     check_xml_chars(field, value)
 }
 
+/// `IdSistemaInformatico`: both positions filled, each an uppercase
+/// letter but Ñ, or a digit (AEAT Validaciones §3.1.5).
+pub(crate) fn check_id_sistema_informatico(
+    field: &'static str,
+    id: &str,
+) -> Result<(), SerializeError> {
+    if id.len() == 2
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+    {
+        return Ok(());
+    }
+    Err(SerializeError::Field {
+        field,
+        problem: format!("two of A-Z or 0-9 (AEAT Validaciones §3.1.5), got {id:?}"),
+    })
+}
+
 /// `NumSerieFactura` (`TextoIDFacturaType`, 1..=60): printable ASCII
 /// only — the printed QR carries it, and the QR law admits ASCII
 /// 32..=126 — and no edge whitespace, because the huella cadena trims
@@ -795,11 +814,7 @@ pub fn evento_node(
     } else {
         check_nif("Evento/SistemaInformatico/NIF", &event.nif)?;
     }
-    check_text(
-        "Evento/IdSistemaInformatico",
-        &event.id_sistema_informatico,
-        2,
-    )?;
+    check_id_sistema_informatico("Evento/IdSistemaInformatico", &event.id_sistema_informatico)?;
     check_text("Evento/SistemaInformatico/Version", &event.version, 50)?;
     check_text(
         "Evento/SistemaInformatico/NumeroInstalacion",

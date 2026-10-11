@@ -39,13 +39,11 @@ fn envelope_for_primer_alta() -> String {
         issuer: String::from("B12345678"),
         serie: verifactu::Series::T,
         number: 42,
-        fecha_expedicion: verifactu::FechaExpedicion::parse(&instants.fecha_expedicion)
-            .expect("huso renders the dd-mm-yyyy grammar"),
+        fecha_expedicion: instants.fecha_expedicion,
         tipo_factura: verifactu::TipoFactura::F2,
         cuota_total: verifactu::Money::from_cents(210),
         importe_total: verifactu::Money::from_cents(1210),
-        fecha_huso_gen: verifactu::FechaHuso::parse(&instants.fecha_huso_gen)
-            .expect("huso renders the ISO-8601 grammar"),
+        fecha_huso_gen: instants.fecha_huso_gen,
     };
     let record = verifactu::engine::ChainRecord::seal(kind, EMISSION_INSTANT, None);
     let obligado = Obligado {
@@ -56,7 +54,7 @@ fn envelope_for_primer_alta() -> String {
         nombre_razon: String::from("TEST ERP"),
         nif: String::from("B12345678"),
         nombre_sistema_informatico: String::from("verifactu-wire-test"),
-        id_sistema_informatico: String::from("1"),
+        id_sistema_informatico: String::from("01"),
         version: String::from("0.1.0"),
         numero_instalacion: String::from("1"),
     };

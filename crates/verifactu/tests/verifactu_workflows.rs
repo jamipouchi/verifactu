@@ -38,7 +38,7 @@ fn sif() -> SistemaInformaticoConfig {
         nombre_razon: String::from("Empresa Ejemplo"),
         nif: String::from("B12345678"),
         nombre_sistema_informatico: String::from("test-erp"),
-        id_sistema_informatico: String::from("1"),
+        id_sistema_informatico: String::from("01"),
         version: String::from("0.1.0"),
         numero_instalacion: String::from("1"),
     }
@@ -98,7 +98,7 @@ async fn evento_records_are_always_signed_never_remitted_and_chain_through_huell
     let sif = verifactu::engine::events::EventoSif {
         nif: String::from("B12345678"),
         id: String::new(),
-        id_sistema_informatico: String::from("1"),
+        id_sistema_informatico: String::from("01"),
         version: String::from("0.1.0"),
         numero_instalacion: String::from("1"),
     };

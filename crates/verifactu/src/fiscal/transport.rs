@@ -16,7 +16,7 @@ mod fake;
 #[cfg(any(test, feature = "fakes"))]
 pub use fake::{
     fault_document, respuesta_document, DuplicadoSpec, FakeVerifactuTransport, LineaSpec,
-    RespuestaSpec, ScriptedLine, ScriptedOutcome,
+    RespuestaSpec, ScriptedLine, ScriptedOutcome, SentRecord, SentRequest,
 };
 
 #[derive(Debug)]

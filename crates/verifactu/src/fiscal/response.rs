@@ -310,52 +310,52 @@ pub fn line_note(linea: &RespuestaLinea) -> String {
     )
 }
 
-/// Surfacing lines win over draining ones; a non-Correcto `EstadoEnvio`
-/// that no line explains (zero lines = wholesale rejection) SURFACES,
-/// never Completes.
+/// One record's verdict: `Correcto` completes; a duplicate AEAT already
+/// stores as `Correcta`/`AceptadaConErrores` drains with a note (the
+/// record is registered — never resend); everything else surfaces for an
+/// operator.
+#[must_use]
+pub fn classify_line(linea: &RespuestaLinea) -> Disposition {
+    match linea.estado_registro {
+        EstadoRegistro::Correcto => Disposition::Complete,
+        EstadoRegistro::AceptadoConErrores => Disposition::Surface(line_note(linea)),
+        EstadoRegistro::Incorrecto => match linea
+            .registro_duplicado
+            .as_ref()
+            .map(|dup| dup.estado_duplicado)
+        {
+            Some(estado @ (EstadoDuplicado::Correcta | EstadoDuplicado::AceptadaConErrores)) => {
+                Disposition::DrainWithNote(format!(
+                    "registro duplicado en AEAT (estado almacenado {}): {} — el registro ya \
+                     está remitido, se purga con nota",
+                    estado.as_str(),
+                    line_note(linea)
+                ))
+            }
+            Some(EstadoDuplicado::Anulada) => Disposition::Surface(format!(
+                "registro duplicado pero el almacenado está ANULADO: {} — decide un operador",
+                line_note(linea)
+            )),
+            None => Disposition::Surface(line_note(linea)),
+        },
+    }
+}
+
+/// The envío's verdict over [`classify_line`]: a surfacing line wins over
+/// a draining one; a non-Correcto `EstadoEnvio` that no line explains
+/// (zero lines = wholesale rejection) SURFACES, never Completes.
 #[must_use]
 pub fn classify_response(respuesta: &RespuestaSuministro) -> Disposition {
-    let mut surface: Option<String> = None;
-    let mut drain: Option<String> = None;
+    let mut drain = None;
     for linea in &respuesta.lineas {
-        match linea.estado_registro {
-            EstadoRegistro::Correcto => {}
-            EstadoRegistro::AceptadoConErrores => {
-                surface = Some(line_note(linea));
-            }
-            EstadoRegistro::Incorrecto => {
-                let stored = linea
-                    .registro_duplicado
-                    .as_ref()
-                    .map(|dup| dup.estado_duplicado);
-                match stored {
-                    Some(
-                        estado @ (EstadoDuplicado::Correcta | EstadoDuplicado::AceptadaConErrores),
-                    ) => {
-                        drain = Some(format!(
-                            "registro duplicado en AEAT (estado almacenado {}): {} — el \
-                             registro ya está remitido, se purga con nota",
-                            estado.as_str(),
-                            line_note(linea)
-                        ));
-                    }
-                    Some(EstadoDuplicado::Anulada) => {
-                        surface = Some(format!(
-                            "registro duplicado pero el almacenado está ANULADO: {} — decide \
-                             un operador",
-                            line_note(linea)
-                        ));
-                    }
-                    None => surface = Some(line_note(linea)),
-                }
-            }
+        match classify_line(linea) {
+            Disposition::Complete => {}
+            surface @ Disposition::Surface(_) => return surface,
+            note @ Disposition::DrainWithNote(_) => drain = drain.or(Some(note)),
         }
     }
-    if let Some(note) = surface {
-        return Disposition::Surface(note);
-    }
     if let Some(note) = drain {
-        return Disposition::DrainWithNote(note);
+        return note;
     }
     if respuesta.estado_envio != EstadoEnvio::Correcto {
         return Disposition::Surface(format!(
@@ -375,5 +375,99 @@ pub fn classify_fault(fault: &SoapFault) -> ErrorClass {
         ErrorClass::Transient
     } else {
         ErrorClass::OperatorAction
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        classify_line, classify_response, Disposition, EstadoDuplicado, EstadoEnvio,
+        EstadoRegistro, RegistroDuplicado, RespuestaLinea, RespuestaSuministro, TipoOperacion,
+    };
+
+    fn linea(estado: EstadoRegistro, duplicado: Option<EstadoDuplicado>) -> RespuestaLinea {
+        RespuestaLinea {
+            nif: String::from("B12345678"),
+            num_serie_factura: String::from("T00000001"),
+            fecha_expedicion_factura: String::from("05-10-2026"),
+            tipo_operacion: TipoOperacion::Alta,
+            ref_externa: None,
+            estado_registro: estado,
+            codigo_error_registro: (estado != EstadoRegistro::Correcto).then_some(3000),
+            descripcion_error_registro: None,
+            registro_duplicado: duplicado.map(|estado_duplicado| RegistroDuplicado {
+                id_peticion: String::from("1"),
+                estado_duplicado,
+                codigo_error: None,
+                descripcion_error: None,
+            }),
+        }
+    }
+
+    /// A duplicate AEAT already stores drains (never resend); a stored
+    /// anulada, an error or a plain rejection surfaces.
+    #[test]
+    fn each_line_shape_has_its_verdict() {
+        use EstadoRegistro::{AceptadoConErrores, Correcto, Incorrecto};
+        assert_eq!(classify_line(&linea(Correcto, None)), Disposition::Complete);
+        assert!(matches!(
+            classify_line(&linea(AceptadoConErrores, None)),
+            Disposition::Surface(_)
+        ));
+        assert!(matches!(
+            classify_line(&linea(Incorrecto, None)),
+            Disposition::Surface(_)
+        ));
+        for stored in [
+            EstadoDuplicado::Correcta,
+            EstadoDuplicado::AceptadaConErrores,
+        ] {
+            assert!(matches!(
+                classify_line(&linea(Incorrecto, Some(stored))),
+                Disposition::DrainWithNote(_)
+            ));
+        }
+        let Disposition::Surface(note) =
+            classify_line(&linea(Incorrecto, Some(EstadoDuplicado::Anulada)))
+        else {
+            panic!("a duplicate of an annulled record is the operator's");
+        };
+        assert!(note.contains("ANULADO"));
+    }
+
+    /// The envío: a surfacing line wins over a draining one, and a
+    /// rejected envío with no lines to explain it never completes.
+    #[test]
+    fn the_envio_verdict_folds_its_lines() {
+        let respuesta = |estado_envio, lineas| RespuestaSuministro {
+            csv: None,
+            tiempo_espera_envio: 60,
+            estado_envio,
+            lineas,
+        };
+        let drained = linea(EstadoRegistro::Incorrecto, Some(EstadoDuplicado::Correcta));
+        let surfaced = linea(EstadoRegistro::Incorrecto, None);
+        assert!(matches!(
+            classify_response(&respuesta(
+                EstadoEnvio::ParcialmenteCorrecto,
+                vec![drained.clone(), surfaced]
+            )),
+            Disposition::Surface(_)
+        ));
+        assert!(matches!(
+            classify_response(&respuesta(EstadoEnvio::Incorrecto, vec![drained])),
+            Disposition::DrainWithNote(_)
+        ));
+        assert!(matches!(
+            classify_response(&respuesta(EstadoEnvio::Incorrecto, Vec::new())),
+            Disposition::Surface(_)
+        ));
+        assert_eq!(
+            classify_response(&respuesta(
+                EstadoEnvio::Correcto,
+                vec![linea(EstadoRegistro::Correcto, None)]
+            )),
+            Disposition::Complete
+        );
     }
 }

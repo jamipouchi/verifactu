@@ -37,6 +37,13 @@ pub const VERIFIABLE_CAPTION: &str = "Factura verificable en la sede electrónic
 /// [`VERIFIABLE_CAPTION`]'s admitted short form.
 pub const VERIFIABLE_CAPTION_SHORT: &str = "VERI*FACTU";
 
+/// The printed QR's error-correction level (spec §3): M. A generic QR
+/// library's default, L, silently violates it.
+pub const QR_ERROR_CORRECTION: char = 'M';
+
+/// The printed QR's side, in millimetres (spec §3): 30×30 to 40×40.
+pub const QR_SIDE_MM: std::ops::RangeInclusive<u32> = 30..=40;
+
 /// The four bases (spec §5.1 verifiable, §5.2 no verificable).
 fn base(environment: Environment, modality: Modality) -> &'static str {
     match (environment, modality) {
@@ -82,9 +89,8 @@ fn encode(value: &str) -> String {
 /// its `ImporteTotal` at the wire grammar (2dp, unsigned zero).
 ///
 /// The URL is this crate's law; the IMAGE is the consumer's — but two
-/// of its parameters are legal, not rendering, choices: error
-/// correction level **M** (a generic QR library's default L silently
-/// violates the spec) and 30×30–40×40 mm. Print
+/// of its parameters are legal, not rendering, choices:
+/// [`QR_ERROR_CORRECTION`] and [`QR_SIDE_MM`]. Print
 /// [`TRIBUTARY_CAPTION`] above, and — remission modality —
 /// [`VERIFIABLE_CAPTION`] below.
 #[must_use]

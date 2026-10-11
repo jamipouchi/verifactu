@@ -8,7 +8,7 @@ vocabularies). The PDFs and the other schemas are **not** vendored: their
 facts live in the tables below, their identity in the hashes. **Never
 fetch anything at test time** — this directory is the offline truth.
 
-Retrieval date: **2026-09-28** (the QR document: **2026-10-05**). To
+Retrieval date: **2026-09-28** (the QR document: **2026-10-05**; the validations document: **2026-10-11**). To
 refresh a snapshot, download it from the URL below, check the new hash
 against the old one, and land the bytes, the hash and every code change
 the diff implies in one commit.
@@ -28,6 +28,7 @@ the diff implies in one commit.
 | `Veri-Factu_especificaciones_huella_hash_registros.pdf` | no | 1174110 | `f4334c254bb875b417247b54315199f89d75a8c4814dfd1e86efec562653d7de` | `https://www.agenciatributaria.es/static_files/AEAT_Desarrolladores/EEDD/IVA/VERI-FACTU/Veri-Factu_especificaciones_huella_hash_registros.pdf` (v0.1.2: the huella) |
 | `AnexosEjemplosFirmaRegFact.zip` | no — its two XMLs are `fixtures/xades/golden/aeat-official/` | 5881 | `66fac533bef6c93c041b08704bf538843fe552052a2994899aba0875c2c4b24e` | `https://www.agenciatributaria.es/static_files/AEAT_Desarrolladores/EEDD/IVA/VERI-FACTU/Espec-Tecnicas/AnexosEjemplosFirmaRegFact.zip` |
 | `DetalleEspecificacTecnCodigoQRfactura.pdf` | no | 786534 | `f86b3c260d8a4963dbc18c5007732b53199156c5d1db63242e68db71501b49eb` | `https://www.agenciatributaria.es/static_files/AEAT_Desarrolladores/EEDD/IVA/VERI-FACTU/DetalleEspecificacTecnCodigoQRfactura.pdf` (v0.5.0: the QR law) |
+| `Validaciones_Errores_Veri-Factu.pdf` | no | 658946 | `426eb926fc098a36a163f66ca5f40d9e0847ca23300bbe5008979832d3513440` | `https://www.agenciatributaria.es/static_files/AEAT_Desarrolladores/EEDD/IVA/VERI-FACTU/Validaciones_Errores_Veri-Factu.pdf` (v1.2.2, 2026-04-08, retrieved 2026-10-11: which records AEAT rejects and which it accepts with errors — the law behind the gates in `fiscal/xml.rs`) |
 
 ## XAdES policy digest facts (for the `xades` policy registry)
 

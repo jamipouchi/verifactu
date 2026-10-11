@@ -239,6 +239,19 @@ impl FakeVerifactuTransport {
         self.sent.lock().expect("fake transport state lock").clone()
     }
 
+    /// Every submission envelope sent, read back — the records' keys
+    /// and `RefExterna` without scraping XML. Consultas are skipped.
+    ///
+    /// # Panics
+    /// If the state lock is poisoned.
+    #[must_use]
+    pub fn sent_requests(&self) -> Vec<SentRequest> {
+        self.sent_envelopes()
+            .iter()
+            .filter_map(|envelope| sent_request(envelope).ok())
+            .collect()
+    }
+
     /// # Panics
     /// If the state lock is poisoned.
     #[must_use]
@@ -462,8 +475,9 @@ impl VerifactuTransport for FakeVerifactuTransport {
     }
 }
 
+/// One record a submission envelope carried, as the fake read it.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct SentRecord {
+pub struct SentRecord {
     pub nif: String,
     pub num_serie: String,
     pub fecha: String,
@@ -473,10 +487,10 @@ struct SentRecord {
     pub ref_externa: Option<String>,
 }
 
-/// What a response must echo (SW §5): the `Cabecera` obligado plus every
-/// remitted record's key.
+/// One submission envelope as the fake read it: the `Cabecera` obligado
+/// plus every remitted record's key — what a response must echo (SW §5).
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct SentRequest {
+pub struct SentRequest {
     pub obligado_nombre: String,
     pub obligado_nif: String,
     pub records: Vec<SentRecord>,

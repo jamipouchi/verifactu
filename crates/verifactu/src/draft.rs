@@ -2,9 +2,7 @@
 //! record and its chain cursor out.
 
 use crate::builder::Environment;
-use crate::domain::chain::{
-    ChainKind, ChainRecord, FechaExpedicion, FechaHuso, Predecessor, TipoFactura,
-};
+use crate::domain::chain::{ChainKind, ChainRecord, Predecessor, TipoFactura};
 use crate::domain::money::Money;
 use crate::domain::series::Series;
 use crate::fiscal::{
@@ -251,13 +249,11 @@ impl InvoiceDraft {
             issuer: issuer.to_owned(),
             serie,
             number,
-            fecha_expedicion: FechaExpedicion::parse(&instants.fecha_expedicion)
-                .expect("huso renders the dd-mm-yyyy grammar"),
+            fecha_expedicion: instants.fecha_expedicion,
             tipo_factura: tipo,
             cuota_total: Money::from_cents(cuota_total),
             importe_total: Money::from_cents(importe_total),
-            fecha_huso_gen: FechaHuso::parse(&instants.fecha_huso_gen)
-                .expect("huso renders the ISO-8601 grammar"),
+            fecha_huso_gen: instants.fecha_huso_gen,
         };
         Ok(Built {
             kind,
@@ -326,8 +322,8 @@ impl EmittedInvoice {
     ///
     /// The image is the consumer's print pipeline, but two of its
     /// parameters are legal, not rendering, choices (art. 21 via §3):
-    /// error-correction level **M** — a generic QR library's default L
-    /// silently violates the spec — and 30×30–40×40 mm, with
+    /// error-correction level [`QR_ERROR_CORRECTION`](crate::QR_ERROR_CORRECTION)
+    /// and a side of [`QR_SIDE_MM`](crate::QR_SIDE_MM), with
     /// [`TRIBUTARY_CAPTION`](crate::TRIBUTARY_CAPTION) above and —
     /// remission modality — [`VERIFIABLE_CAPTION`](crate::VERIFIABLE_CAPTION)
     /// below.
@@ -434,8 +430,7 @@ pub async fn cancel_draft(
         serie: invoice.serie.clone(),
         number: invoice.number,
         fecha_expedicion: invoice.fecha_expedicion.clone(),
-        fecha_huso_gen: FechaHuso::parse(&instants.fecha_huso_gen)
-            .expect("huso renders the ISO-8601 grammar"),
+        fecha_huso_gen: instants.fecha_huso_gen,
     };
     seal_and_submit(
         emitter,

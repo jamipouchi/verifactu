@@ -250,10 +250,11 @@ pub struct Obligado {
     pub nif: String,
 }
 
-/// Only the variable identity members: the fixed-declaration members are
-/// constants at the wire renderer (`xml::sistema_informatico`) — a
-/// boolean whose only legal value is a constant is law wearing a
-/// datatype.
+/// The `SistemaInformatico` block: `nombre_razon`/`nif` name the
+/// PRODUCER of the invoicing software (AEAT Validaciones §3.1.5: "la
+/// persona o entidad productora del sistema informático"), not the
+/// obligado. Only the variable members: the fixed declarations are
+/// constants at the wire renderer (`xml::sistema_informatico`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SistemaInformaticoConfig {
     pub nombre_razon: String,
@@ -262,6 +263,43 @@ pub struct SistemaInformaticoConfig {
     pub id_sistema_informatico: String,
     pub version: String,
     pub numero_instalacion: String,
+}
+
+impl SistemaInformaticoConfig {
+    /// The block's law, checkable at configuration time: SI.xsd's
+    /// simple types plus AEAT Validaciones §3.1.5 (a non-empty
+    /// `NombreSistemaInformatico`, a two-position `IdSistemaInformatico`).
+    ///
+    /// # Errors
+    /// [`EmitError::InvalidRecord`] naming the field.
+    pub fn validate(&self) -> Result<(), EmitError> {
+        xml::check_nif("SistemaInformatico/NIF", &self.nif)?;
+        xml::check_text("SistemaInformatico/NombreRazon", &self.nombre_razon, 120)?;
+        if self.nombre_sistema_informatico.trim().is_empty() {
+            return Err(EmitError::InvalidRecord {
+                detail: String::from(
+                    "SistemaInformatico/NombreSistemaInformatico is required (AEAT Validaciones \
+                     §3.1.5)",
+                ),
+            });
+        }
+        xml::check_text(
+            "SistemaInformatico/NombreSistemaInformatico",
+            &self.nombre_sistema_informatico,
+            30,
+        )?;
+        xml::check_id_sistema_informatico(
+            "SistemaInformatico/IdSistemaInformatico",
+            &self.id_sistema_informatico,
+        )?;
+        xml::check_text("SistemaInformatico/Version", &self.version, 50)?;
+        xml::check_text(
+            "SistemaInformatico/NumeroInstalacion",
+            &self.numero_instalacion,
+            100,
+        )?;
+        Ok(())
+    }
 }
 
 /// `FinRequerimiento=S` marks the last batch of the requerimiento this
@@ -543,28 +581,7 @@ impl VerifactuEmitter {
     ) -> Result<Self, EmitError> {
         xml::check_nif("ObligadoEmision/NIF", &obligado.nif)?;
         xml::check_text("ObligadoEmision/NombreRazon", &obligado.nombre_razon, 120)?;
-        xml::check_nif("SistemaInformatico/NIF", &sif.nif)?;
-        for (field, value, max) in [
-            ("SistemaInformatico/NombreRazon", &sif.nombre_razon, 120),
-            (
-                "SistemaInformatico/NombreSistemaInformatico",
-                &sif.nombre_sistema_informatico,
-                30,
-            ),
-            (
-                "SistemaInformatico/IdSistemaInformatico",
-                &sif.id_sistema_informatico,
-                2,
-            ),
-            ("SistemaInformatico/Version", &sif.version, 50),
-            (
-                "SistemaInformatico/NumeroInstalacion",
-                &sif.numero_instalacion,
-                100,
-            ),
-        ] {
-            xml::check_text(field, value, max)?;
-        }
+        sif.validate()?;
         Ok(Self {
             modality,
             obligado,
@@ -837,7 +854,7 @@ impl VerifactuEmitter {
 
 #[cfg(test)]
 pub(crate) mod tests_support {
-    use crate::domain::chain::{ChainKind, ChainRecord, FechaExpedicion, FechaHuso, TipoFactura};
+    use crate::domain::chain::{ChainKind, ChainRecord, TipoFactura};
     use crate::domain::money::Money;
     use crate::domain::series::Series;
 
@@ -873,7 +890,7 @@ pub(crate) mod tests_support {
             nombre_razon: String::from("Empresa Ejemplo"),
             nif: String::from("B12345678"),
             nombre_sistema_informatico: String::from("test-erp"),
-            id_sistema_informatico: String::from("1"),
+            id_sistema_informatico: String::from("01"),
             version: String::from("0.1.0"),
             numero_instalacion: String::from("1"),
         }
@@ -887,13 +904,11 @@ pub(crate) mod tests_support {
                 issuer: String::from("B12345678"),
                 serie: Series::T,
                 number: 42,
-                fecha_expedicion: FechaExpedicion::parse(&instants.fecha_expedicion)
-                    .expect("huso renders the dd-mm-yyyy grammar"),
+                fecha_expedicion: instants.fecha_expedicion,
                 tipo_factura: TipoFactura::F2,
                 cuota_total: Money::from_cents(210),
                 importe_total: Money::from_cents(1210),
-                fecha_huso_gen: FechaHuso::parse(&instants.fecha_huso_gen)
-                    .expect("huso renders the ISO-8601 grammar"),
+                fecha_huso_gen: instants.fecha_huso_gen,
             },
             EMISSION_INSTANT,
             None,
@@ -932,8 +947,11 @@ mod tests {
             crate::clock::zone::SiteZone::EuropeMadrid,
             EMISSION_INSTANT,
         );
-        assert_eq!(instants.fecha_expedicion, "03-02-2025");
-        assert_eq!(instants.fecha_huso_gen, "2025-02-03T14:30:00+01:00");
+        assert_eq!(instants.fecha_expedicion.as_str(), "03-02-2025");
+        assert_eq!(
+            instants.fecha_huso_gen.as_str(),
+            "2025-02-03T14:30:00+01:00"
+        );
         let input = format!(
             "IDEmisorFactura=89890001K&NumSerieFactura=12345678-G66&\
              FechaExpedicionFactura={}&TipoFactura=R3&CuotaTotal=41.4&ImporteTotal=241.4&\

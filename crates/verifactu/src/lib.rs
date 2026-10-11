@@ -144,7 +144,8 @@ pub use crate::fiscal::{
     Modality, Obligado, OperacionExenta, TipoRectificativa,
 };
 pub use crate::qr::{
-    verification_url, TRIBUTARY_CAPTION, VERIFIABLE_CAPTION, VERIFIABLE_CAPTION_SHORT,
+    verification_url, QR_ERROR_CORRECTION, QR_SIDE_MM, TRIBUTARY_CAPTION, VERIFIABLE_CAPTION,
+    VERIFIABLE_CAPTION_SHORT,
 };
 pub use crate::signer::{FiscalSigner, SignerError};
 
@@ -162,6 +163,7 @@ pub mod engine {
     pub use crate::clock::{Clock, SystemClock, Timestamp};
     pub use crate::domain::chain::{
         huella, verify_chain, ChainBreak, ChainKind, ChainRecord, EventData, Predecessor, PrevRef,
+        SealError,
     };
     pub use crate::emit_draft;
     pub use crate::fiscal::consulta;

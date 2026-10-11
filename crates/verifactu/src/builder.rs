@@ -67,45 +67,48 @@ pub enum CertFamily {
 /// declaration, fixed across every tenant.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SifConfig {
+    productor: Obligado,
     nombre_sistema_informatico: String,
     id_sistema_informatico: String,
     version: String,
 }
 
 impl SifConfig {
+    /// `productor` is the person or entity that produces the invoicing
+    /// software — the same on every tenant's records — then the system's
+    /// name, two-position id and version.
+    ///
     /// # Errors
-    /// [`VerifactuError::Identity`] — the SI.xsd simple types
-    /// (`TextMax30`/`TextMax2`/`TextMax50`), naming the field.
-    pub fn new(nombre: &str, id: &str, version: &str) -> Result<Self, VerifactuError> {
-        let check = |field: &'static str, value: &str, max: usize| {
-            if value.is_empty() || value.chars().count() > max {
-                Err(VerifactuError::Identity(format!(
-                    "{field} must be 1..{max} chars, got {value:?}"
-                )))
-            } else {
-                Ok(())
-            }
-        };
-        check("NombreSistemaInformatico", nombre, 30)?;
-        check("IdSistemaInformatico", id, 2)?;
-        check("Version", version, 50)?;
-        Ok(Self {
+    /// [`VerifactuError::Identity`] naming the field, per
+    /// [`SistemaInformaticoConfig::validate`].
+    pub fn new(
+        productor: Obligado,
+        nombre: &str,
+        id: &str,
+        version: &str,
+    ) -> Result<Self, VerifactuError> {
+        let sif = Self {
+            productor,
             nombre_sistema_informatico: nombre.to_owned(),
             id_sistema_informatico: id.to_owned(),
             version: version.to_owned(),
-        })
+        };
+        if version.is_empty() {
+            return Err(VerifactuError::Identity(String::from(
+                "SistemaInformatico/Version is required",
+            )));
+        }
+        sif.for_installation("1")
+            .validate()
+            .map_err(|error| VerifactuError::Identity(error.to_string()))?;
+        Ok(sif)
     }
 
-    /// The `SistemaInformatico` block one installation declares: the
-    /// SIF's producer is the obligado itself in both custody models.
-    pub(crate) fn for_installation(
-        &self,
-        obligado: &Obligado,
-        installation: &str,
-    ) -> SistemaInformaticoConfig {
+    /// The `SistemaInformatico` block one installation declares.
+    pub(crate) fn for_installation(&self, installation: &str) -> SistemaInformaticoConfig {
         SistemaInformaticoConfig {
-            nombre_razon: obligado.nombre_razon.clone(),
-            nif: obligado.nif.clone(),
+            nombre_razon: self.productor.nombre_razon.clone(),
+            nif: self.productor.nif.clone(),
             nombre_sistema_informatico: self.nombre_sistema_informatico.clone(),
             id_sistema_informatico: self.id_sistema_informatico.clone(),
             version: self.version.clone(),

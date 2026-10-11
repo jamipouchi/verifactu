@@ -378,23 +378,39 @@ impl ChainRecord {
         }
     }
 
-    /// # Panics
+    /// Seals `kind` onto `prev`: populates the chain link and computes
+    /// the huella.
     ///
-    /// - On an evento identity that is not exactly one of NIF/ID (HS §3
-    ///   excluyente).
-    /// - When an invoice kind's `number > 99_999_999`
-    ///   ([`series::format`]'s bug class).
-    /// - When `kind` and `prev` come from different chain families — the
-    ///   invoice and event chains never chain onto each other (HS §3).
+    /// # Panics
+    /// Where [`ChainRecord::try_seal`] refuses — the door for numbers and
+    /// identities that come from outside.
     #[must_use]
     pub fn seal(kind: ChainKind, fecha: u64, prev: Option<&Predecessor>) -> ChainRecord {
-        if let ChainKind::Evento { event, .. } = &kind {
-            let nif_informed = !event.nif.trim().is_empty();
-            let id_informed = !event.id.trim().is_empty();
-            assert!(
-                nif_informed != id_informed,
-                "evento identity is exactly one of NIF or ID (HS §3, excluyente)"
-            );
+        Self::try_seal(kind, fecha, prev).unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    /// [`ChainRecord::seal`] without the panic.
+    ///
+    /// # Errors
+    /// [`SealError`] per its variants.
+    pub fn try_seal(
+        kind: ChainKind,
+        fecha: u64,
+        prev: Option<&Predecessor>,
+    ) -> Result<ChainRecord, SealError> {
+        match &kind {
+            ChainKind::Alta { number, .. } | ChainKind::Anulacion { number, .. } => {
+                if *number > 99_999_999 {
+                    return Err(SealError::CorrelativeOutOfRange(*number));
+                }
+            }
+            ChainKind::Evento { event, .. } => {
+                let nif_informed = !event.nif.trim().is_empty();
+                let id_informed = !event.id.trim().is_empty();
+                if nif_informed == id_informed {
+                    return Err(SealError::EventoIdentity);
+                }
+            }
         }
         let (prev_ref, prev_evento_huella) = match (&kind, prev) {
             (
@@ -405,21 +421,7 @@ impl ChainRecord {
                 (None, Some(huella.clone()))
             }
             (_, None) => (None, None),
-            (
-                ChainKind::Alta { .. } | ChainKind::Anulacion { .. },
-                Some(Predecessor::Evento(_)),
-            ) => {
-                panic!(
-                    "invoice records chain only off invoice records — an evento \
-                     predecessor mixes the chain families (HS §3)"
-                );
-            }
-            (ChainKind::Evento { .. }, Some(Predecessor::Factura(_))) => {
-                panic!(
-                    "evento records chain only off evento records — an invoice \
-                     predecessor mixes the chain families (HS §3)"
-                );
-            }
+            _ => return Err(SealError::MixedFamilies),
         };
         let mut record = ChainRecord {
             kind,
@@ -429,8 +431,31 @@ impl ChainRecord {
             huella: String::new(),
         };
         record.huella = huella(&record.cadena());
-        record
+        Ok(record)
     }
+
+    /// Whether this record is sealed onto exactly `prev` — `None` for a
+    /// chain's first record. The single link [`verify_chain`] checks.
+    #[must_use]
+    pub fn is_sealed_onto(&self, prev: Option<&Predecessor>) -> bool {
+        self.sealed_onto() == Ok(prev.cloned())
+    }
+}
+
+/// Why a record cannot be sealed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum SealError {
+    /// `NumSerieFactura` renders the correlative in 8 digits; a gapless
+    /// series never reaches a 9-digit one.
+    #[error("the correlative {0} exceeds 99_999_999 (NumSerieFactura renders 8 digits)")]
+    CorrelativeOutOfRange(u64),
+    /// HS §3: an event's SIF identity is exactly one of NIF or ID.
+    #[error("evento identity is exactly one of NIF or ID (HS §3, excluyente)")]
+    EventoIdentity,
+    /// HS §3: invoice records chain only off invoice records, events only
+    /// off events.
+    #[error("the predecessor mixes the chain families — invoices and events never chain onto each other (HS §3)")]
+    MixedFamilies,
 }
 
 /// Where a stored chain stops verifying, by position.
@@ -459,7 +484,7 @@ pub fn verify_chain(records: &[ChainRecord]) -> Result<(), ChainBreak> {
         if !record.huella_recomputes() {
             return Err(ChainBreak::Huella { index });
         }
-        if record.sealed_onto() != Ok(previous) {
+        if !record.is_sealed_onto(previous.as_ref()) {
             return Err(ChainBreak::Link { index });
         }
         previous = Some(record.predecessor());
@@ -471,7 +496,7 @@ pub fn verify_chain(records: &[ChainRecord]) -> Result<(), ChainBreak> {
 mod tests {
     use super::{
         huella, verify_chain, ChainBreak, ChainKind, ChainRecord, EventData, FechaExpedicion,
-        FechaHuso, Money, Series, TipoFactura,
+        FechaHuso, Money, Predecessor, SealError, Series, TipoFactura,
     };
 
     fn fecha(value: &str) -> FechaExpedicion {
@@ -647,6 +672,50 @@ mod tests {
             verify_chain(&[stuffed]),
             Err(ChainBreak::Link { index: 0 }),
             "the event slot is not hashed on an invoice — only the link check sees it"
+        );
+    }
+
+    /// `try_seal` names each refusal `seal` would panic on.
+    #[test]
+    fn try_seal_refuses_with_the_reason() {
+        let alta = |number: u64| ChainKind::Alta {
+            issuer: String::from("B12345678"),
+            serie: Series::T,
+            number,
+            fecha_expedicion: fecha("01-01-2024"),
+            tipo_factura: TipoFactura::F2,
+            cuota_total: Money::from_cents(210),
+            importe_total: Money::from_cents(1210),
+            fecha_huso_gen: instante("2024-01-01T19:20:30+01:00"),
+        };
+        assert_eq!(
+            ChainRecord::try_seal(alta(100_000_000), 0, None),
+            Err(SealError::CorrelativeOutOfRange(100_000_000))
+        );
+        assert!(ChainRecord::try_seal(alta(99_999_999), 0, None).is_ok());
+        assert_eq!(
+            ChainRecord::try_seal(alta(1), 0, Some(&Predecessor::Evento(String::new()))),
+            Err(SealError::MixedFamilies)
+        );
+        let event = |nif: &str, id: &str| ChainKind::Evento {
+            event: EventData {
+                nif: nif.to_owned(),
+                id: id.to_owned(),
+                id_sistema_informatico: String::from("77"),
+                version: String::from("1.0"),
+                numero_instalacion: String::from("1"),
+                nif_obligado: String::from("89890001K"),
+                tipo_evento: String::from("OTROS_EVENTOS_VOLUNTARIOS"),
+            },
+            fecha_huso_gen_evento: instante("2025-02-03T14:30:00+01:00"),
+        };
+        assert_eq!(
+            ChainRecord::try_seal(event("89890001K", "X1"), 0, None),
+            Err(SealError::EventoIdentity)
+        );
+        assert_eq!(
+            ChainRecord::try_seal(event("", ""), 0, None),
+            Err(SealError::EventoIdentity)
         );
     }
 

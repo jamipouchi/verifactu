@@ -6,20 +6,27 @@
 //! owns the string shapes only.
 
 use crate::clock::zone::{civil_datetime, SiteZone};
+use crate::domain::chain::{FechaExpedicion, FechaHuso};
 
+/// The two instants a record seals, already in their wire grammars.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RenderedInstants {
-    pub fecha_expedicion: String,
-    pub fecha_huso_gen: String,
+    pub fecha_expedicion: FechaExpedicion,
+    pub fecha_huso_gen: FechaHuso,
 }
 
 /// One call, one zone, one instant — the two rendered instants can never
 /// disagree about the seal moment.
+///
+/// # Panics
+/// Never: both renderings produce their grammar by construction.
 #[must_use]
 pub fn render_instants(zone: SiteZone, epoch_secs: u64) -> RenderedInstants {
     RenderedInstants {
-        fecha_expedicion: fecha_expedicion(zone, epoch_secs),
-        fecha_huso_gen: fecha_huso_gen(zone, epoch_secs),
+        fecha_expedicion: FechaExpedicion::parse(&fecha_expedicion(zone, epoch_secs))
+            .expect("the dd-mm-yyyy rendering"),
+        fecha_huso_gen: FechaHuso::parse(&fecha_huso_gen(zone, epoch_secs))
+            .expect("the ISO-8601-with-offset rendering"),
     }
 }
 

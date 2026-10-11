@@ -1,12 +1,25 @@
 //! The flat face end to end, over the engine fakes.
 
 use crate::{
-    endpoint_table, CertFamily, Environment, ProductionOptIn, SifConfig, Verifactu, VerifactuError,
+    endpoint_table, CertFamily, Environment, Obligado, ProductionOptIn, SifConfig, Verifactu,
+    VerifactuError,
 };
+
+/// The software's producer — never one of the tenants below.
+fn productor() -> Obligado {
+    Obligado {
+        nombre_razon: String::from("PRODUCTORA DE SOFTWARE SL"),
+        nif: String::from("B11223344"),
+    }
+}
+
+fn sif() -> SifConfig {
+    SifConfig::new(productor(), "mi-facturacion", "MF", "1.0.0").expect("valid SIF")
+}
 
 fn root() -> Verifactu {
     Verifactu::builder()
-        .sif(SifConfig::new("mi-facturacion", "MF", "1.0.0").expect("valid SIF"))
+        .sif(sif())
         .build()
         .expect("pruebas root builds with no gate")
 }
@@ -21,7 +34,7 @@ fn the_production_gate_fails_closed_without_the_deployment_key() {
         .environment(Environment::production(
             ProductionOptIn::these_emissions_are_legally_binding(),
         ))
-        .sif(SifConfig::new("mi-facturacion", "MF", "1.0.0").expect("valid SIF"))
+        .sif(sif())
         .build()
         .expect_err("the deployment key is absent");
     assert!(
@@ -34,7 +47,7 @@ fn the_production_gate_fails_closed_without_the_deployment_key() {
         .environment(Environment::production(
             ProductionOptIn::these_emissions_are_legally_binding(),
         ))
-        .sif(SifConfig::new("mi-facturacion", "MF", "1.0.0").expect("valid SIF"))
+        .sif(sif())
         .build()
         .expect("token + key");
     assert_eq!(root.environment(), Environment::Production);
@@ -55,15 +68,68 @@ fn the_endpoint_table_is_the_documented_eight() {
     assert!(remission.contains("www1.agenciatributaria.gob.es"));
 }
 
+/// AEAT Validaciones §3.1.5, eagerly: a named system, a two-position
+/// id of A-Z/0-9 (no Ñ, no lowercase), a well-formed producer.
 #[test]
 fn the_sif_identity_validates_eagerly() {
+    let sif = |nombre: &str, id: &str| SifConfig::new(productor(), nombre, id, "1.0");
+    assert!(sif("x", "F1").is_ok());
+    for id in ["FMA", "F", "", "f1", "Ñ1", "F-"] {
+        assert!(sif("x", id).is_err(), "IdSistemaInformatico {id:?}");
+    }
     assert!(
-        SifConfig::new("x", "FMA", "1.0").is_err(),
-        "IdSistemaInformatico is TextMax2"
+        sif("", "FM").is_err(),
+        "NombreSistemaInformatico is required"
     );
     assert!(
-        SifConfig::new("", "FM", "1.0").is_err(),
-        "names are non-empty"
+        sif("  ", "FM").is_err(),
+        "NombreSistemaInformatico has content"
+    );
+    let unnamed = Obligado {
+        nombre_razon: String::from("PRODUCTORA"),
+        nif: String::from("B1122334"),
+    };
+    assert!(
+        SifConfig::new(unnamed, "x", "FM", "1.0").is_err(),
+        "the producer's NIF"
+    );
+}
+
+/// The `SistemaInformatico` block names the software's producer on every
+/// tenant's records — never the tenant (AEAT Validaciones §3.1.5).
+#[tokio::test]
+async fn the_sistema_informatico_names_the_producer_not_the_tenant() {
+    use crate::engine::{FakeSigner, FakeVerifactuTransport};
+    use crate::{lines, CertificateSource, InvoiceDraft, Series};
+    let transport = std::sync::Arc::new(FakeVerifactuTransport::new());
+    let tenant = root()
+        .tenant(CertificateSource::Custom {
+            signer: std::sync::Arc::new(FakeSigner::new()),
+            transport: std::sync::Arc::clone(&transport) as _,
+        })
+        .obligado(Obligado {
+            nombre_razon: String::from("ANA RUIZ PEREZ"),
+            nif: String::from("12345678Z"),
+        })
+        .connect()
+        .expect("hermetic legs");
+    tenant
+        .emit_invoice(
+            InvoiceDraft::new()
+                .serie(Series::T, 1)
+                .descripcion("venta mostrador")
+                .line(lines::sujeta_iva(2100, 1_000)),
+            None,
+        )
+        .await
+        .expect("the invoice emits");
+    let envelope = &transport.sent_envelopes()[0];
+    assert!(
+        envelope.contains(
+            "<sum1:SistemaInformatico><sum1:NombreRazon>PRODUCTORA DE SOFTWARE SL</sum1:NombreRazon>\
+             <sum1:NIF>B11223344</sum1:NIF>"
+        ),
+        "{envelope}"
     );
 }
 
@@ -434,7 +500,9 @@ async fn the_custom_door_wires_both_custody_models_over_injected_legs() {
         1,
         "exactly one envío traveled the injected transport"
     );
-    assert!(sent[0].contains("T00000007"));
+    let request = &fake_transport.sent_requests()[0];
+    assert_eq!(request.obligado_nif, "12345678Z");
+    assert_eq!(request.records[0].num_serie, "T00000007");
     assert_eq!(
         fake_signer.signed_count(),
         0,
@@ -498,7 +566,7 @@ async fn the_draft_gates_and_the_sealed_echo() {
     });
     let clock = std::sync::Arc::new(FakeClock::new(Timestamp(1_738_589_400)));
     let tenant = Verifactu::builder()
-        .sif(SifConfig::new("mi-facturacion", "MF", "1.0.0").expect("valid SIF"))
+        .sif(sif())
         .clock(clock)
         .build()
         .expect("pruebas root builds with no gate")
