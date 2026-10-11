@@ -338,7 +338,14 @@ pub(crate) fn registro_alta(
             problem: String::from("record kind is not Alta"),
         });
     };
-    check_alta(ctx, obligado, issuer, *cuota_total, *importe_total)?;
+    check_alta(
+        ctx,
+        obligado,
+        issuer,
+        fecha_expedicion,
+        *cuota_total,
+        *importe_total,
+    )?;
     let num_serie = series::format(serie, *number);
     check_num_serie("IDFactura/NumSerieFactura", &num_serie)?;
     if modality == Modality::Remission {
@@ -476,6 +483,7 @@ fn check_alta(
     ctx: &EmissionContext<'_>,
     obligado: &Obligado,
     issuer: &str,
+    fecha: &crate::domain::chain::FechaExpedicion,
     cuota_total: Money,
     importe_total: Money,
 ) -> Result<(), SerializeError> {
@@ -523,15 +531,57 @@ fn check_alta(
         )?;
     }
     for destinatario in ctx.destinatarios {
-        check_destinatario(destinatario)?;
+        check_destinatario(destinatario, fecha.ymd())?;
     }
     Ok(())
+}
+
+/// Whether `id` has the structure of a member state's NIF-IVA as AEAT
+/// validates it (Validaciones §3.1.3.13, Nota 1): the uppercase country
+/// prefix, then the number. Northern Ireland: `GB` before 2021, `GB` or
+/// `XI` in January 2021, `XI` after.
+fn is_nif_iva(id: &str, fecha: (i64, u32, u32)) -> bool {
+    let (Some(prefix), Some(number)) = (id.get(..2), id.get(2..)) else {
+        return false;
+    };
+    let len = number.len();
+    let numeric = number.bytes().all(|b| b.is_ascii_digit());
+    let alphanumeric = number
+        .bytes()
+        .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit());
+    match prefix {
+        "DE" | "EE" | "EL" | "PT" => numeric && len == 9,
+        "AT" | "CY" => alphanumeric && len == 9,
+        "BE" | "PL" | "SK" => numeric && len == 10,
+        "CZ" => numeric && (8..=10).contains(&len),
+        "HR" | "IT" | "LV" => numeric && len == 11,
+        "DK" | "SI" | "FI" | "HU" | "LU" | "MT" => numeric && len == 8,
+        "FR" => alphanumeric && len == 11,
+        "NL" => alphanumeric && len == 12,
+        "IE" => alphanumeric && matches!(len, 8 | 9),
+        "LT" => numeric && matches!(len, 9 | 12),
+        "SE" => numeric && len == 12,
+        "BG" => numeric && matches!(len, 9 | 10),
+        "RO" => numeric && (2..=10).contains(&len) && !number.starts_with('0'),
+        "GB" | "XI" => {
+            let admitted = if fecha < (2021, 1, 1) {
+                prefix == "GB"
+            } else {
+                fecha <= (2021, 1, 31) || prefix == "XI"
+            };
+            admitted && alphanumeric && matches!(len, 5 | 9 | 12)
+        }
+        _ => false,
+    }
 }
 
 /// One destinatario's syntax and identification — the rules AEAT applies
 /// in every regime (§4.3.2 keeps NIF/IDOtro identification even bajo
 /// requerimiento).
-fn check_destinatario(destinatario: &crate::fiscal::IDDestinatario) -> Result<(), SerializeError> {
+fn check_destinatario(
+    destinatario: &crate::fiscal::IDDestinatario,
+    fecha: (i64, u32, u32),
+) -> Result<(), SerializeError> {
     check_text(
         "IDDestinatario/NombreRazon",
         &destinatario.nombre_razon,
@@ -564,6 +614,16 @@ fn check_destinatario(destinatario: &crate::fiscal::IDDestinatario) -> Result<()
             problem: String::from(
                 "a Spanish IDOtro is a passport (03) or a no-censado NIF (07) — a NIF rides \
                  NIF (§3.1.3.13)",
+            ),
+        });
+    }
+    if otro.id_type == IdOtroType::NifIva && !is_nif_iva(&otro.id, fecha) {
+        return Err(SerializeError::Field {
+            field: "IDDestinatario/IDOtro/ID",
+            problem: format!(
+                "{:?} is not a member state's NIF-IVA (prefix + number, uppercase) (§3.1.3.13, \
+                 Nota 1)",
+                otro.id
             ),
         });
     }
@@ -1318,6 +1378,39 @@ mod tests {
         assert!(check_text("DescripcionOperacion", &bmp, 500).is_ok());
         let fits = format!("{}🌸", "a".repeat(498));
         assert!(check_text("DescripcionOperacion", &fits, 500).is_ok());
+    }
+
+    /// Nota 1's NIF-IVA structures, on both edges, and the Brexit dates.
+    #[test]
+    fn nif_iva_structures_per_member_state() {
+        use super::is_nif_iva;
+        let today = (2026, 10, 11);
+        for admitted in [
+            "DE123456789",
+            "FR1A345678901",
+            "NL123456789B01",
+            "RO12",
+            "IE1234567X",
+            "XI123456789",
+            "CZ12345678",
+        ] {
+            assert!(is_nif_iva(admitted, today), "{admitted}");
+        }
+        for refused in [
+            "DE12345678",
+            "de123456789",
+            "FR1a345678901",
+            "RO012",
+            "ES12345678Z",
+            "GB123456789",
+            "PT12345678X",
+            "X",
+        ] {
+            assert!(!is_nif_iva(refused, today), "{refused}");
+        }
+        assert!(is_nif_iva("GB123456789", (2020, 12, 31)));
+        assert!(!is_nif_iva("XI123456789", (2020, 12, 31)));
+        assert!(is_nif_iva("GB123456789", (2021, 1, 15)));
     }
 
     /// The serializer's text reaches the record verbatim: a description

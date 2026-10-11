@@ -282,41 +282,49 @@ fn destinatario() -> impl Strategy<Value = IDDestinatario> {
         2 => "[A-Za-z]{2}".prop_map(Some),
         1 => text(3).prop_map(Some),
     ];
-    // AEAT's identification pairs (§3.1.3.13): a Spanish IDOtro is a
-    // passport (03) or a no-censado NIF (07), and 07 is always Spanish.
+    // AEAT's identification rules (§3.1.3.13): a Spanish IDOtro is a
+    // passport (03) or a no-censado NIF (07), 07 is always Spanish, and a
+    // NIF-IVA (02) has its member state's structure.
+    let otro = |id_type, codigo_pais: Option<&str>, id: String| IdOtro {
+        codigo_pais: codigo_pais.map(str::to_owned),
+        id_type,
+        id,
+    };
     let coherent_otro = prop_oneof![
         (
             proptest::sample::select(vec![IdOtroType::Pasaporte, IdOtroType::NoCensado]),
-            Just(Some(String::from("ES")))
-        ),
+            text(20)
+        )
+            .prop_map(move |(id_type, id)| otro(id_type, Some("ES"), id)),
+        "DE[0-9]{9}|FR[0-9A-Z]{11}|PT[0-9]{9}".prop_map(move |id| otro(
+            IdOtroType::NifIva,
+            None,
+            id
+        )),
         (
             proptest::sample::select(vec![
-                IdOtroType::NifIva,
                 IdOtroType::Pasaporte,
                 IdOtroType::IdPaisResidencia,
                 IdOtroType::CertificadoResidencia,
                 IdOtroType::OtroDocumentoProbatorio
             ]),
-            prop_oneof![
-                Just(None),
-                proptest::sample::select(vec!["FR", "PT", "US", "DE", "MA"])
-                    .prop_map(|c| Some(c.to_owned()))
-            ]
-        ),
+            proptest::option::of(proptest::sample::select(vec!["FR", "PT", "US", "DE", "MA"])),
+            text(20)
+        )
+            .prop_map(move |(id_type, pais, id)| otro(id_type, pais, id)),
     ];
-    let otro = prop_oneof![
-        WILD => coherent_otro,
-        1 => (pick::<IdOtroType>(), codigo_pais),
-    ];
-    let identificacion = prop_oneof![
-        nif().prop_map(IdentificacionDestinatario::Nif),
-        (otro, text(20)).prop_map(|((id_type, codigo_pais), id)| {
-            IdentificacionDestinatario::Otro(IdOtro {
+    let arbitrary_otro =
+        (pick::<IdOtroType>(), codigo_pais, text(20)).prop_map(|(id_type, codigo_pais, id)| {
+            IdOtro {
                 codigo_pais,
                 id_type,
                 id,
-            })
-        }),
+            }
+        });
+    let identificacion = prop_oneof![
+        nif().prop_map(IdentificacionDestinatario::Nif),
+        prop_oneof![WILD => coherent_otro, 1 => arbitrary_otro]
+            .prop_map(IdentificacionDestinatario::Otro),
     ];
     (text(120), identificacion).prop_map(|(nombre_razon, identificacion)| IDDestinatario {
         nombre_razon,
