@@ -90,8 +90,10 @@ behaviour differ, follow the behaviour and record it in the comment.
 Laws worth knowing before you touch `fiscal/xml.rs`:
 
 - **Text**: XML 1.0 `Char` (`check_xml_chars`, with the same predicate
-  on the read side, `is_char_code`). `maxLength` counts **UTF-16 code
-  units**: AEAT validates on Java, so an emoji is 2 (`check_max`).
+  on the read side, `is_char_code`). `maxLength` counts characters, an
+  emoji being one, as XSD defines it (`check_max`). Whether AEAT's Java
+  validator counts an emoji as two is unverified: settle it at pruebas
+  before changing the rule, never on a guess.
 - **NIF**: 9 ASCII alphanumerics (`check_nif`).
 - **NumSerieFactura**: 1..=60 printable ASCII (the QR law), with no edge
   whitespace, because the huella cadena trims what the wire sends

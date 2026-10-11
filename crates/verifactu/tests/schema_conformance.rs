@@ -62,26 +62,18 @@ fn respuesta_consulta_lr() -> &'static XsdValidator {
 }
 
 /// Well-formedness on the document as sent; validity on a copy whose
-/// non-ASCII characters are widened to one `x` per UTF-16 code unit.
-/// uppsala's length facets count UTF-8 bytes, where XSD counts
-/// characters and AEAT's Java validator UTF-16 units — the widening
-/// makes the oracle count the units the crate's gates enforce (a
-/// non-ASCII character never satisfies an enumeration or a digit
-/// pattern, before or after).
+/// non-ASCII characters each become one `x`. uppsala's length facets
+/// count UTF-8 bytes where XSD counts characters — the substitution
+/// makes the oracle count characters (a non-ASCII character never
+/// satisfies an enumeration or a digit pattern, before or after).
 fn assert_schema_valid(validator: &XsdValidator, document: &str) {
     uppsala::parse(document)
         .unwrap_or_else(|error| panic!("not well-formed XML ({error}): {document}"));
-    let widened: String = document
+    let ascii: String = document
         .chars()
-        .map(|ch| {
-            if ch.is_ascii() {
-                ch.to_string()
-            } else {
-                "x".repeat(ch.len_utf16())
-            }
-        })
+        .map(|ch| if ch.is_ascii() { ch } else { 'x' })
         .collect();
-    let parsed = uppsala::parse(&widened).expect("the widened copy stays well-formed");
+    let parsed = uppsala::parse(&ascii).expect("the ASCII copy stays well-formed");
     let violations = validator.validate(&parsed);
     assert!(
         violations.is_empty(),
@@ -124,9 +116,9 @@ fn block_on<F: std::future::Future>(future: F) -> F::Output {
 /// stream of single defects.
 const WILD: u32 = 60;
 
-/// Text within `max` UTF-16 units — ASCII, Spanish letters, markup,
-/// line breaks, emoji — or, rarely, wild: any Unicode scalar (controls
-/// and non-characters included), up to `max + 5` chars.
+/// Text within `max` chars — ASCII, Spanish letters, markup, line
+/// breaks, emoji — or, rarely, wild: any Unicode scalar (controls and
+/// non-characters included), up to `max + 5` chars.
 fn text(max: usize) -> BoxedStrategy<String> {
     let clean = prop_oneof![
         6 => proptest::char::range(' ', '~'),
@@ -134,16 +126,8 @@ fn text(max: usize) -> BoxedStrategy<String> {
         1 => proptest::sample::select(vec!['&', '<', '>', '"', '\'', '\r', '\n', '\t']),
         1 => proptest::char::range('\u{1F300}', '\u{1FAFF}'),
     ];
-    let clean = proptest::collection::vec(clean, 0..=max).prop_map(move |chars| {
-        let mut out = String::new();
-        for ch in chars {
-            if out.encode_utf16().count() + ch.len_utf16() > max {
-                break;
-            }
-            out.push(ch);
-        }
-        out
-    });
+    let clean =
+        proptest::collection::vec(clean, 0..=max).prop_map(|chars| chars.into_iter().collect());
     let wild = proptest::collection::vec(proptest::char::any(), 0..=max + 5)
         .prop_map(|chars| chars.into_iter().collect());
     prop_oneof![WILD => clean, 1 => wild].boxed()

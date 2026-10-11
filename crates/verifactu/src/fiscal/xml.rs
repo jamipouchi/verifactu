@@ -210,12 +210,17 @@ pub(crate) fn check_nif(field: &'static str, nif: &str) -> Result<(), SerializeE
     })
 }
 
+/// XSD `maxLength` counts characters (Unicode scalar values) — an emoji
+/// is one. Whether AEAT's Java validator agrees for supplementary-plane
+/// characters (Java strings count UTF-16 units, where an emoji is two)
+/// is unverified: a ceiling-length name carrying an emoji at pruebas
+/// settles it.
 fn check_max(field: &'static str, value: &str, max: usize) -> Result<(), SerializeError> {
-    let count = value.encode_utf16().count();
+    let count = value.chars().count();
     if count > max {
         return Err(SerializeError::Field {
             field,
-            problem: format!("max {max} chars (UTF-16 code units), got {count}"),
+            problem: format!("max {max} chars, got {count}"),
         });
     }
     Ok(())
@@ -1398,6 +1403,17 @@ mod tests {
         ) {
             assert_char_law(&text);
         }
+    }
+
+    /// `maxLength` counts characters: a ceiling-length name carrying
+    /// emoji (two UTF-16 units each) is admitted; one char more is not.
+    #[test]
+    fn max_length_counts_characters_not_utf16_units() {
+        let ceiling: String = "Gil·li «Ñ» 🌸 ".chars().cycle().take(120).collect();
+        assert!(ceiling.encode_utf16().count() > 120);
+        assert!(check_text("IDDestinatario/NombreRazon", &ceiling, 120).is_ok());
+        let over = format!("{ceiling}x");
+        assert!(check_text("IDDestinatario/NombreRazon", &over, 120).is_err());
     }
 
     /// The serializer's text reaches the record verbatim: a description
