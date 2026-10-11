@@ -208,17 +208,21 @@ pub(crate) fn check_nif(field: &'static str, nif: &str) -> Result<(), SerializeE
     })
 }
 
-/// XSD `maxLength` counts characters (Unicode scalar values) — an emoji
-/// is one. Whether AEAT's Java validator agrees for supplementary-plane
-/// characters (Java strings count UTF-16 units, where an emoji is two)
-/// is unverified: a ceiling-length name carrying an emoji at pruebas
-/// settles it.
+/// AEAT measures `maxLength` in UTF-16 code units, not the characters
+/// XSD speaks of: a supplementary-plane character (an emoji) costs two.
+/// Live-confirmed at pruebas 2026-10-11: a 500-char
+/// `DescripcionOperacion` ending in one emoji (501 units) is refused
+/// with 1100, while emoji and BMP text beyond Latin-1 well inside the
+/// limit are `Correcto`.
 fn check_max(field: &'static str, value: &str, max: usize) -> Result<(), SerializeError> {
-    let count = value.chars().count();
-    if count > max {
+    let units = value.encode_utf16().count();
+    if units > max {
         return Err(SerializeError::Field {
             field,
-            problem: format!("max {max} chars, got {count}"),
+            problem: format!(
+                "max {max} chars as AEAT counts them (UTF-16 code units — an emoji is 2), \
+                 got {units}"
+            ),
         });
     }
     Ok(())
@@ -1324,15 +1328,18 @@ mod tests {
         }
     }
 
-    /// `maxLength` counts characters: a ceiling-length name carrying
-    /// emoji (two UTF-16 units each) is admitted; one char more is not.
+    /// AEAT's own edge (pruebas 2026-10-11): 499 chars plus one emoji is
+    /// 500 chars but 501 UTF-16 units — refused, where the same text
+    /// with the emoji swapped for a BMP character is admitted.
     #[test]
-    fn max_length_counts_characters_not_utf16_units() {
-        let ceiling: String = "Gil·li «Ñ» 🌸 ".chars().cycle().take(120).collect();
-        assert!(ceiling.encode_utf16().count() > 120);
-        assert!(check_text("IDDestinatario/NombreRazon", &ceiling, 120).is_ok());
-        let over = format!("{ceiling}x");
-        assert!(check_text("IDDestinatario/NombreRazon", &over, 120).is_err());
+    fn max_length_counts_utf16_units_as_aeat_does() {
+        let at_limit = format!("{}🌸", "a".repeat(499));
+        assert_eq!(at_limit.chars().count(), 500);
+        assert!(check_text("DescripcionOperacion", &at_limit, 500).is_err());
+        let bmp = format!("{}€", "a".repeat(499));
+        assert!(check_text("DescripcionOperacion", &bmp, 500).is_ok());
+        let fits = format!("{}🌸", "a".repeat(498));
+        assert!(check_text("DescripcionOperacion", &fits, 500).is_ok());
     }
 
     /// The serializer's text reaches the record verbatim: a description
