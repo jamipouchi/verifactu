@@ -14,13 +14,11 @@ use crate::fiscal::{
 
 pub(crate) const NS_SUMINISTRO: &str = "https://www2.agenciatributaria.gob.es/static_files/common/internet/dep/aplicaciones/es/aeat/tike/cont/ws/SuministroInformacion.xsd";
 const NS_LR: &str = "https://www2.agenciatributaria.gob.es/static_files/common/internet/dep/aplicaciones/es/aeat/tike/cont/ws/SuministroLR.xsd";
-pub(crate) const NS_RESPUESTA: &str = "https://www2.agenciatributaria.gob.es/static_files/common/internet/dep/aplicaciones/es/aeat/tike/cont/ws/RespuestaSuministro.xsd";
 pub(crate) const NS_SOAP_ENV: &str = "http://schemas.xmlsoap.org/soap/envelope/";
 
 /// AEAT's own signed example's SI prefix.
 const P_SF: &str = "sum1";
 const P_LR: &str = "sumLR";
-pub(crate) const P_RS: &str = "sfR";
 pub(crate) const P_ENV: &str = "soapenv";
 
 /// The only value `VersionType` admits.
@@ -1226,85 +1224,6 @@ fn find_tag_end(xml: &str, start: usize) -> Option<(usize, bool)> {
         index += 1;
     }
     None
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct SentRecord {
-    pub nif: String,
-    pub num_serie: String,
-    pub fecha: String,
-    pub tipo_operacion: crate::fiscal::response::TipoOperacion,
-    /// The record's `RefExterna` when it carried one — the respuesta
-    /// echo must answer it back (real AEAT does; so does the fake).
-    pub ref_externa: Option<String>,
-}
-
-/// What a response must echo (SW §5): the `Cabecera` obligado plus every
-/// remitted record's key.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct SentRequest {
-    pub obligado_nombre: String,
-    pub obligado_nif: String,
-    pub records: Vec<SentRecord>,
-}
-
-/// # Errors
-/// Our own output — an envelope that does not parse is a bug, not an
-/// input class.
-pub(crate) fn sent_request(envelope: &str) -> Result<SentRequest, String> {
-    let root = parse_tree(envelope)?;
-    let body = root.child("Body").ok_or("no soapenv:Body")?;
-    let reg_factu = body
-        .child("RegFactuSistemaFacturacion")
-        .ok_or("no RegFactuSistemaFacturacion")?;
-    let cabecera = reg_factu.child("Cabecera").ok_or("no Cabecera")?;
-    let obligado = cabecera
-        .child("ObligadoEmision")
-        .ok_or("no ObligadoEmision")?;
-    let mut records = Vec::new();
-    for registro_factura in reg_factu
-        .children
-        .iter()
-        .filter(|node| node.local == "RegistroFactura")
-    {
-        for record in &registro_factura.children {
-            let tipo_operacion = match record.local.as_str() {
-                "RegistroAlta" => crate::fiscal::response::TipoOperacion::Alta,
-                "RegistroAnulacion" => crate::fiscal::response::TipoOperacion::Anulacion,
-                other => return Err(format!("unexpected record element <{other}>")),
-            };
-            let id_factura = record
-                .child("IDFactura")
-                .ok_or("record without IDFactura")?;
-            let nif = id_factura
-                .child_text("IDEmisorFactura")
-                .or_else(|| id_factura.child_text("IDEmisorFacturaAnulada"))
-                .ok_or("IDFactura without issuer")?;
-            let num_serie = id_factura
-                .child_text("NumSerieFactura")
-                .or_else(|| id_factura.child_text("NumSerieFacturaAnulada"))
-                .ok_or("IDFactura without NumSerieFactura")?;
-            let fecha = id_factura
-                .child_text("FechaExpedicionFactura")
-                .or_else(|| id_factura.child_text("FechaExpedicionFacturaAnulada"))
-                .ok_or("IDFactura without FechaExpedicionFactura")?;
-            let ref_externa = record
-                .child_text("RefExterna")
-                .filter(|text| !text.is_empty());
-            records.push(SentRecord {
-                nif,
-                num_serie,
-                fecha,
-                tipo_operacion,
-                ref_externa,
-            });
-        }
-    }
-    Ok(SentRequest {
-        obligado_nombre: obligado.child_text("NombreRazon").unwrap_or_default(),
-        obligado_nif: obligado.child_text("NIF").unwrap_or_default(),
-        records,
-    })
 }
 
 #[cfg(test)]

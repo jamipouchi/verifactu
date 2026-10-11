@@ -4,10 +4,6 @@
 //! modality's signing policy (who signs what) lives in
 //! [`crate::fiscal::VerifactuEmitter`].
 
-use std::sync::Mutex;
-
-use sha2::{Digest, Sha256};
-
 #[derive(Debug, thiserror::Error)]
 pub enum SignerError {
     /// No usable signing certificate (store locked, smartcard absent,
@@ -19,7 +15,7 @@ pub enum SignerError {
 }
 
 /// The one signing port. Implementations: `XadesSigner` (feature
-/// `signing`), [`FakeSigner`] for hermetic tests, or the consumer's own
+/// `signing`), `FakeSigner` for hermetic tests (feature `fakes`), or the consumer's own
 /// over a KMS/HSM.
 pub trait FiscalSigner: Send + Sync {
     /// Returns `doc` with its `ds:Signature` as the LAST CHILD of the
@@ -32,14 +28,16 @@ pub trait FiscalSigner: Send + Sync {
     fn sign_xades_epes(&self, doc: &str) -> Result<String, SignerError>;
 }
 
+#[cfg(any(test, feature = "fakes"))]
 /// Deterministic test fake: SHA-256 hex in a `ds:Signature` element at
 /// the real signature's position. Never a fallback — production wires a
 /// real signer.
 #[derive(Debug, Default)]
 pub struct FakeSigner {
-    signed: Mutex<Vec<String>>,
+    signed: std::sync::Mutex<Vec<String>>,
 }
 
+#[cfg(any(test, feature = "fakes"))]
 impl FakeSigner {
     #[must_use]
     pub fn new() -> Self {
@@ -63,8 +61,11 @@ impl FakeSigner {
     }
 }
 
+#[cfg(any(test, feature = "fakes"))]
 impl FiscalSigner for FakeSigner {
     fn sign_xades_epes(&self, doc: &str) -> Result<String, SignerError> {
+        use sha2::{Digest as _, Sha256};
+
         let Some(split) = doc.rfind('<') else {
             return Err(SignerError::SigningFailed(String::from(
                 "fake signer: document has no closing tag",

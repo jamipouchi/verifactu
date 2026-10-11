@@ -64,7 +64,8 @@ door.
 | `signing` | yes | XAdES-EPES over the bergshamra family: the `Pkcs12` door, `engine::xades` |
 | `edge` | no | `?Send` transport futures for single-threaded runtimes |
 | `serde` | no | JSON shapes for `Emission`, the durable cursors, the sealed kinds, the consulta answers |
-| `test-util` | no | owned-loopback TLS listeners + throwaway CAs |
+| `fakes` | no | hermetic test doubles: `FakeSigner`, `FakeVerifactuTransport` (+ its scripted AEAT documents), `FakeClock` — enable in dev-dependencies |
+| `test-util` | no | owned-loopback TLS listeners + throwaway CAs (implies `fakes`) |
 
 ### Bringing your own transport
 
@@ -83,8 +84,8 @@ Consumers that keep their own durable chain seal records themselves
 through `engine::VerifactuEmitter::submit`; `engine::verify_chain`
 audits a stored chain (every huella recomputes, every record sealed onto
 the one before). One signing port serves both faces: `FiscalSigner`,
-implemented by `engine::XadesSigner`, `engine::FakeSigner`, or your own
-KMS/HSM signer.
+implemented by `engine::XadesSigner`, your own KMS/HSM signer, or
+— in tests, feature `fakes` — `engine::FakeSigner`.
 
 ### Edge runtimes (wasm32: Cloudflare Workers and kin)
 

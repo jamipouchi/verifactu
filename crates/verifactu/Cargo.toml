@@ -54,9 +54,13 @@ edge = []
 # cursors, the sealed kinds, the consulta answers) — Serialize, plus
 # Deserialize for the durable state (cursors, kinds).
 serde = ["dep:serde"]
+# Hermetic test doubles — `FakeSigner`, `FakeVerifactuTransport` and
+# the AEAT-shaped documents it answers with, `FakeClock`. Enable it in
+# dev-dependencies; production builds never compile them.
+fakes = []
 # Test tooling (owned-loopback TLS listeners + throwaway CAs) compiled
 # in, never wired in production.
-test-util = ["http", "signing", "dep:rcgen", "dep:axum"]
+test-util = ["fakes", "http", "signing", "dep:rcgen", "dep:axum"]
 
 [dependencies]
 # domain core
@@ -99,6 +103,8 @@ rcgen = { workspace = true, optional = true }
 axum = { workspace = true, optional = true }
 
 [dev-dependencies]
+# The integration tests drive the fakes under every feature set.
+verifactu = { path = ".", features = ["fakes"] }
 tokio = { workspace = true }
 insta = { workspace = true }
 serde_json = { workspace = true }

@@ -1,5 +1,5 @@
 //! The `Clock` port: production code reads time exclusively through it,
-//! tests inject [`FakeClock`]. Timestamps are UTC epoch seconds
+//! tests inject `FakeClock` (feature `fakes`). Timestamps are UTC epoch seconds
 //! everywhere; the zone is presentation only.
 
 pub mod civil;
@@ -29,12 +29,14 @@ impl Clock for SystemClock {
     }
 }
 
+#[cfg(any(test, feature = "fakes"))]
 /// A settable fixed clock: tests reproduce byte-identical emissions,
 /// and wasm builds (no `SystemTime`) bring their own tiny clock over
 /// the runtime's date API instead.
 #[derive(Debug)]
 pub struct FakeClock(std::sync::Mutex<Timestamp>);
 
+#[cfg(any(test, feature = "fakes"))]
 impl FakeClock {
     #[must_use]
     pub fn new(start: Timestamp) -> Self {
@@ -48,6 +50,7 @@ impl FakeClock {
     }
 }
 
+#[cfg(any(test, feature = "fakes"))]
 impl Clock for FakeClock {
     fn now_utc(&self) -> Timestamp {
         *self.0.lock().expect("fake clock lock")

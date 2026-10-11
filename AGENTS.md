@@ -12,17 +12,23 @@ say so in the commit), never with a special case.
 contracts/aeat-verifactu/   AEAT's official XSDs + WSDL (vendored) and SOURCES.md
 fixtures/xades/             signing test keys, golden signed records, AEAT's signed example
 crates/verifactu/src/
-  lib.rs                    the flat (product) face: builder, custody models, InvoiceDraft,
-                            the production gate; `pub mod engine` re-exports the ledger face
+  lib.rs                    crate docs, module map, the re-exports; `pub mod engine` is the ledger face
+  builder.rs                the flat face's root: Environment + production gate, SifConfig,
+                            CertificateSource, endpoint_table
+  custody.rs                the two custody models (tenant / vendor)
+  draft.rs                  InvoiceDraft, `lines`, EmittedInvoice, emit_draft / cancel_draft
+  tests.rs                  the flat face end to end over the fakes
   domain/                   pure core: chain (huella, ChainRecord, verify_chain), Money, Series
   fiscal/                   the emission engine
     mod.rs                  vocabularies, EmissionContext, EmitError, VerifactuEmitter
     xml.rs                  wire serializer, every field gate, the read-side tree parser
     consulta.rs             the consulta operation (request, read-back, huella audit)
     response.rs             respuesta parsing + the Disposition classifier
-    transport.rs            the VerifactuTransport port, the read edge, FakeVerifactuTransport
+    transport.rs            the VerifactuTransport port and the read edge
+    transport/fake.rs,      FakeVerifactuTransport and the AEAT documents it answers with
+    consulta/fake.rs        (feature `fakes`, which test-util implies)
     huso.rs, events.rs      instant rendering; event records (no public XSD)
-  signer.rs                 the FiscalSigner port + FakeSigner
+  signer.rs                 the FiscalSigner port (+ FakeSigner under `fakes`)
   xades/                    XAdES-EPES signing and verification   (feature `signing`)
   aeat/, wire/              the mTLS HTTP transport              (feature `http`)
   clock/, qr.rs             time port + civil calendar; the cotejo QR URL
@@ -47,6 +53,7 @@ for f in "--no-default-features" \
          "--no-default-features --features edge" \
          "--no-default-features --features serde" \
          "--no-default-features --features http,signing" \
+         "--no-default-features --features fakes" \
          "" "--all-features"; do
   cargo clippy -p verifactu --all-targets $f -- -D warnings
   cargo test   -p verifactu $f
@@ -131,6 +138,9 @@ Rules for new tests:
   mostly-valid input (`WILD` controls the rare defect). After changing
   a generator, check that most cases pass the gates, and mutation-check
   a gate (loosen it and watch the property fail).
+- **Fakes never reach production builds.** They compile only under
+  `cfg(test)` or the `fakes` feature; the integration tests enable it
+  through the crate's self dev-dependency.
 - **Hermetic tests go through the real read edge.** `FakeSigner` and
   `FakeVerifactuTransport` parse everything they produce through the
   production parsers, and the fake's documents are schema-checked. Do
