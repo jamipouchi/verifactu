@@ -350,6 +350,7 @@ pub(crate) fn registro_alta(
             ctx,
             *tipo_factura,
             fecha_expedicion,
+            fecha_huso_gen,
             &num_serie,
             *importe_total,
         )?;
@@ -528,7 +529,7 @@ fn check_alta(
         )?;
     }
     for destinatario in ctx.destinatarios {
-        check_destinatario(destinatario, fecha.ymd())?;
+        check_destinatario(destinatario, &obligado.nif, fecha.ymd())?;
     }
     Ok(())
 }
@@ -574,9 +575,10 @@ fn is_nif_iva(id: &str, fecha: (i64, u32, u32)) -> bool {
 
 /// One destinatario's syntax and identification — the rules AEAT applies
 /// in every regime (§4.3.2 keeps NIF/IDOtro identification even bajo
-/// requerimiento).
+/// requerimiento). The codes are AEAT's error list (`errores.properties`).
 fn check_destinatario(
     destinatario: &crate::fiscal::IDDestinatario,
+    obligado_nif: &str,
     fecha: (i64, u32, u32),
 ) -> Result<(), SerializeError> {
     check_text(
@@ -585,34 +587,66 @@ fn check_destinatario(
         120,
     )?;
     let otro = match &destinatario.identificacion {
-        IdentificacionDestinatario::Nif(nif) => return check_nif("IDDestinatario/NIF", nif),
+        IdentificacionDestinatario::Nif(nif) => {
+            check_nif("IDDestinatario/NIF", nif)?;
+            if nif == obligado_nif {
+                return Err(SerializeError::Field {
+                    field: "IDDestinatario/NIF",
+                    problem: String::from(
+                        "the destinatario is not the obligado itself (AEAT 1193)",
+                    ),
+                });
+            }
+            return Ok(());
+        }
         IdentificacionDestinatario::Otro(otro) => otro,
     };
-    if let Some(pais) = &otro.codigo_pais {
-        if CODIGOS_PAIS.binary_search(&pais.as_str()).is_err() {
-            return Err(SerializeError::Field {
-                field: "IDDestinatario/IDOtro/CodigoPais",
-                problem: format!(
-                    "{pais:?} is not a CountryType2 code (uppercase ISO 3166-1 alpha-2)"
-                ),
-            });
+    let refuse = |field, problem: &str| {
+        Err(SerializeError::Field {
+            field,
+            problem: problem.to_owned(),
+        })
+    };
+    match &otro.codigo_pais {
+        None if otro.id_type != IdOtroType::NifIva => {
+            return refuse(
+                "IDDestinatario/IDOtro/CodigoPais",
+                "required unless IDType is 02 (NIF-IVA) (AEAT 1111, §3.1.3.13)",
+            );
+        }
+        None => {}
+        Some(pais) => {
+            if CODIGOS_PAIS.binary_search(&pais.as_str()).is_err() {
+                return Err(SerializeError::Field {
+                    field: "IDDestinatario/IDOtro/CodigoPais",
+                    problem: format!(
+                        "{pais:?} is not a CountryType2 code (uppercase ISO 3166-1 alpha-2)"
+                    ),
+                });
+            }
+            // A NIF-IVA names its state in its prefix; EL and XI are no
+            // CountryType2 code, so those ride without CodigoPais.
+            if otro.id_type == IdOtroType::NifIva && otro.id.get(..2) != Some(pais.as_str()) {
+                return refuse(
+                    "IDDestinatario/IDOtro/CodigoPais",
+                    "a NIF-IVA's CodigoPais is its prefix — or omit it (AEAT 1122)",
+                );
+            }
         }
     }
     let spanish = otro.codigo_pais.as_deref() == Some("ES");
     if otro.id_type == IdOtroType::NoCensado && !spanish {
-        return Err(SerializeError::Field {
-            field: "IDDestinatario/IDOtro/CodigoPais",
-            problem: String::from("IDType 07 (no censado) requires CodigoPais ES (§3.1.3.13)"),
-        });
+        return refuse(
+            "IDDestinatario/IDOtro/CodigoPais",
+            "IDType 07 (no censado) requires CodigoPais ES (§3.1.3.13)",
+        );
     }
     if spanish && !matches!(otro.id_type, IdOtroType::Pasaporte | IdOtroType::NoCensado) {
-        return Err(SerializeError::Field {
-            field: "IDDestinatario/IDOtro/IDType",
-            problem: String::from(
-                "a Spanish IDOtro is a passport (03) or a no-censado NIF (07) — a NIF rides \
-                 NIF (§3.1.3.13)",
-            ),
-        });
+        return refuse(
+            "IDDestinatario/IDOtro/IDType",
+            "a Spanish IDOtro is a passport (03) or a no-censado NIF (07) — a NIF rides \
+             NIF (§3.1.3.13)",
+        );
     }
     if otro.id_type == IdOtroType::NifIva && !is_nif_iva(&otro.id, fecha) {
         return Err(SerializeError::Field {
@@ -624,7 +658,41 @@ fn check_destinatario(
             ),
         });
     }
+    if otro.id_type == IdOtroType::NoCensado && !is_persona_fisica_nif(&otro.id) {
+        return Err(SerializeError::Field {
+            field: "IDDestinatario/IDOtro/ID",
+            problem: format!(
+                "{:?} is not a natural person's NIF (DNI, NIE or K/L/M with its control \
+                 letter), which IDType 07 requires (AEAT 1131)",
+                otro.id
+            ),
+        });
+    }
     check_text("IDDestinatario/IDOtro/ID", &otro.id, 20)
+}
+
+/// A natural person's NIF: a DNI (8 digits), a NIE (X/Y/Z standing for
+/// 0/1/2, then 7 digits) or a K/L/M NIF (7 digits), each followed by
+/// its control letter, the number modulo 23.
+fn is_persona_fisica_nif(id: &str) -> bool {
+    const CONTROL: &[u8; 23] = b"TRWAGMYFPDXBNJZSQVHLCKE";
+    let bytes = id.as_bytes();
+    if bytes.len() != 9 {
+        return false;
+    }
+    let (lead, digits): (u32, _) = match bytes[0] {
+        b'X' | b'K' | b'L' | b'M' => (0, &bytes[1..8]),
+        b'Y' => (1, &bytes[1..8]),
+        b'Z' => (2, &bytes[1..8]),
+        _ => (0, &bytes[..8]),
+    };
+    if !digits.iter().all(u8::is_ascii_digit) {
+        return false;
+    }
+    let number = digits
+        .iter()
+        .fold(lead, |n, d| n * 10 + u32::from(d - b'0'));
+    bytes[8] == CONTROL[(number % 23) as usize]
 }
 
 fn check_detalle(detalle: &DetalleDesglose) -> Result<(), SerializeError> {
@@ -1408,6 +1476,74 @@ mod tests {
         assert!(is_nif_iva("GB123456789", (2020, 12, 31)));
         assert!(!is_nif_iva("XI123456789", (2020, 12, 31)));
         assert!(is_nif_iva("GB123456789", (2021, 1, 15)));
+    }
+
+    /// AEAT's identification codes, each on both edges.
+    #[test]
+    fn destinatario_identification_per_aeat_error_list() {
+        use super::check_destinatario;
+        use crate::fiscal::{IDDestinatario, IdOtro, IdOtroType, IdentificacionDestinatario};
+        let today = (2026, 10, 11);
+        let check = |identificacion| {
+            check_destinatario(
+                &IDDestinatario {
+                    nombre_razon: String::from("CLIENTE"),
+                    identificacion,
+                },
+                "B12345678",
+                today,
+            )
+            .map_err(|error| error.to_string())
+        };
+        let nif = |nif: &str| IdentificacionDestinatario::Nif(nif.to_owned());
+        let otro = |id_type, pais: Option<&str>, id: &str| {
+            IdentificacionDestinatario::Otro(IdOtro {
+                codigo_pais: pais.map(str::to_owned),
+                id_type,
+                id: id.to_owned(),
+            })
+        };
+        let refused = |result: Result<(), String>, code: &str| {
+            let error = result.expect_err("refused");
+            assert!(error.contains(code), "cites {code}: {error}");
+        };
+        // 1193: never the obligado itself.
+        assert_eq!(check(nif("B87654321")), Ok(()));
+        refused(check(nif("B12345678")), "1193");
+        // 1111: CodigoPais is required unless NIF-IVA.
+        assert_eq!(check(otro(IdOtroType::NifIva, None, "DE123456789")), Ok(()));
+        assert_eq!(
+            check(otro(IdOtroType::Pasaporte, Some("FR"), "12AB34567")),
+            Ok(())
+        );
+        refused(
+            check(otro(IdOtroType::Pasaporte, None, "12AB34567")),
+            "1111",
+        );
+        // 1122: a NIF-IVA's CodigoPais is its prefix.
+        assert_eq!(
+            check(otro(IdOtroType::NifIva, Some("DE"), "DE123456789")),
+            Ok(())
+        );
+        refused(
+            check(otro(IdOtroType::NifIva, Some("FR"), "DE123456789")),
+            "1122",
+        );
+        // 1131: a no-censado is a natural person's NIF, control letter
+        // included (12345678 mod 23 = 14, Z; X1234567 → L).
+        for admitted in ["12345678Z", "X1234567L", "Y1234567X", "K1234567L"] {
+            assert_eq!(
+                check(otro(IdOtroType::NoCensado, Some("ES"), admitted)),
+                Ok(()),
+                "{admitted}"
+            );
+        }
+        for refused_id in ["12345678A", "B12345678", "1234567Z", "X123456AL"] {
+            refused(
+                check(otro(IdOtroType::NoCensado, Some("ES"), refused_id)),
+                "1131",
+            );
+        }
     }
 
     /// The serializer's text reaches the record verbatim: a description

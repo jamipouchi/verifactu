@@ -257,6 +257,13 @@ impl FechaHuso {
         structural.then(|| Self(String::from(value)))
     }
 
+    /// The civil `(year, month, day)` at the instant's own offset.
+    #[must_use]
+    pub fn ymd(&self) -> (i64, u32, u32) {
+        let field = |range: std::ops::Range<usize>| self.0[range].parse::<u32>().unwrap_or(0);
+        (i64::from(field(0..4)), field(5..7), field(8..10))
+    }
+
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0

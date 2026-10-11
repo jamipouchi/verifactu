@@ -11,13 +11,13 @@
 //!
 //! "IVA" below includes an absent `Impuesto`, as AEAT reads it.
 
-use crate::domain::chain::{FechaExpedicion, TipoFactura};
+use crate::domain::chain::{FechaExpedicion, FechaHuso, TipoFactura};
 use crate::domain::money::Money;
 use crate::fiscal::xml::SerializeError;
 use crate::fiscal::{
     CalificacionOperacion as Calificacion, ClaveRegimen as Clave, DetalleDesglose, EmissionContext,
-    IdentificacionDestinatario, Impuesto, OperacionExenta as Exenta, RechazoPrevio, SiNo,
-    TipoRectificativa,
+    IdOtroType, IdentificacionDestinatario, Impuesto, OperacionExenta as Exenta, RechazoPrevio,
+    SiNo, TipoRectificativa,
 };
 
 type Ymd = (i64, u32, u32);
@@ -44,6 +44,7 @@ pub(crate) fn check_alta(
     ctx: &EmissionContext<'_>,
     tipo: TipoFactura,
     fecha: &FechaExpedicion,
+    generado: &FechaHuso,
     num_serie: &str,
     importe_total: Money,
 ) -> Result<(), SerializeError> {
@@ -52,6 +53,18 @@ pub(crate) fn check_alta(
         return Err(refuse(
             "IDFactura/FechaExpedicionFactura",
             format!("{fecha} precedes 28-10-2024, the order's entry into force (§3.1.3.1)"),
+        ));
+    }
+    // AEAT measures "the current date" at reception, never before the
+    // record was generated: a factura dated after its own record's
+    // generation is refused whenever it is sent early enough.
+    if date > generado.ymd() {
+        return Err(refuse(
+            "IDFactura/FechaExpedicionFactura",
+            format!(
+                "{fecha} is after the record's generation ({generado}) — a factura is never \
+                 issued in the future (AEAT 1112, §3.1.3.1)"
+            ),
         ));
     }
     if let Some(forbidden) = num_serie.chars().find(|c| "\"'<>=".contains(*c)) {
@@ -122,8 +135,8 @@ fn check_rectificacion(ctx: &EmissionContext<'_>, tipo: TipoFactura) -> Result<(
     Ok(())
 }
 
-/// §3.1.3.13 (the identification rules of `IDOtro` are checked in every
-/// regime, by the serializer).
+/// §3.1.3.13 and AEAT's error list (the identification rules of
+/// `IDOtro` are checked in every regime, by the serializer).
 fn check_destinatarios(ctx: &EmissionContext<'_>, tipo: TipoFactura) -> Result<(), SerializeError> {
     if tipo.requires_destinatario() && ctx.destinatarios.is_empty() {
         return Err(refuse(
@@ -142,6 +155,31 @@ fn check_destinatarios(ctx: &EmissionContext<'_>, tipo: TipoFactura) -> Result<(
                 tipo.as_str()
             ),
         ));
+    }
+    // R3 (bad debts) and R2 (concurso) name a counterparty AEAT can
+    // follow: a NIF, a no-censado, and on R2 a NIF-IVA too.
+    let admitted = |id_type| match tipo {
+        TipoFactura::R3 => id_type == IdOtroType::NoCensado,
+        TipoFactura::R2 => matches!(id_type, IdOtroType::NoCensado | IdOtroType::NifIva),
+        _ => true,
+    };
+    for destinatario in ctx.destinatarios {
+        if let IdentificacionDestinatario::Otro(otro) = &destinatario.identificacion {
+            if !admitted(otro.id_type) {
+                return Err(refuse(
+                    "IDDestinatario/IDOtro/IDType",
+                    format!(
+                        "TipoFactura {} admits a NIF, IDType 07{} only (AEAT 1191, 1192)",
+                        tipo.as_str(),
+                        if tipo == TipoFactura::R2 {
+                            " or 02"
+                        } else {
+                            ""
+                        }
+                    ),
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -232,6 +270,9 @@ fn check_detalle(
                     field,
                     "S2 carries TipoImpositivo = 0 and CuotaRepercutida = 0, both present (§15.4)",
                 ));
+            }
+            if d.tipo_recargo_equivalencia.is_some() || d.cuota_recargo_equivalencia.is_some() {
+                return Err(refuse(field, "recargo rides S1 lines only (AEAT 1281)"));
             }
         }
         Some(Calificacion::NoSujetaOtras | Calificacion::NoSujetaLocalizacion) if iva && rated => {
@@ -430,18 +471,25 @@ fn date_label((year, month, day): Ymd) -> String {
 #[cfg(test)]
 mod tests {
     use super::check_alta;
-    use crate::domain::chain::{FechaExpedicion, TipoFactura};
+    use crate::domain::chain::{FechaExpedicion, FechaHuso, TipoFactura};
     use crate::domain::money::Money;
     use crate::draft::lines;
     use crate::fiscal::tests_support::{iva_super, obligado, primer_alta_record, sif};
     use crate::fiscal::{
         xml, CalificacionOperacion as Calificacion, ClaveRegimen as Clave, DetalleDesglose,
-        EmissionContext, IDDestinatario, IdentificacionDestinatario, Impuesto, Modality,
-        OperacionExenta as Exenta, RechazoPrevio, SiNo, TipoRectificativa,
+        EmissionContext, IDDestinatario, IdOtro, IdOtroType, IdentificacionDestinatario, Impuesto,
+        Modality, OperacionExenta as Exenta, RechazoPrevio, SiNo, TipoRectificativa,
     };
 
     fn fecha(value: &str) -> FechaExpedicion {
         FechaExpedicion::parse(value).expect("a real date")
+    }
+
+    /// The record generated at noon of the factura's own day.
+    fn generado(fecha: &FechaExpedicion) -> FechaHuso {
+        let (year, month, day) = fecha.ymd();
+        FechaHuso::parse(&format!("{year}-{month:02}-{day:02}T12:00:00+01:00"))
+            .expect("an ISO instant")
     }
 
     fn nif_dest() -> IDDestinatario {
@@ -481,6 +529,7 @@ mod tests {
             &ctx,
             tipo,
             &fecha(on),
+            &generado(&fecha(on)),
             "T00000001",
             Money::from_cents(importe),
         )
@@ -518,6 +567,7 @@ mod tests {
             },
             F2,
             &fecha(DAY),
+            &generado(&fecha(DAY)),
             "T<1",
             Money::from_cents(1210),
         );
@@ -566,6 +616,54 @@ mod tests {
             verdict(F2, DAY, &ok, |c| c.destinatarios = dest),
             "§3.1.3.13",
         );
+        let otro = |id_type, pais: &str, id: &str| -> &'static [IDDestinatario] {
+            Box::leak(Box::new([IDDestinatario {
+                nombre_razon: String::from("CLIENTE"),
+                identificacion: IdentificacionDestinatario::Otro(IdOtro {
+                    codigo_pais: Some(pais.to_owned()),
+                    id_type,
+                    id: id.to_owned(),
+                }),
+            }]))
+        };
+        let pasaporte = otro(IdOtroType::Pasaporte, "FR", "12AB34567");
+        let no_censado = otro(IdOtroType::NoCensado, "ES", "12345678Z");
+        let nif_iva = otro(IdOtroType::NifIva, "DE", "DE123456789");
+        let r = |tipo, dest| {
+            verdict(tipo, DAY, &ok, |c| {
+                c.destinatarios = dest;
+                c.tipo_rectificativa = Some(TipoRectificativa::Incremental);
+            })
+        };
+        assert_eq!(r(TipoFactura::R1, pasaporte), Ok(()));
+        assert_eq!(r(TipoFactura::R3, no_censado), Ok(()));
+        refused(r(TipoFactura::R3, nif_iva), "1191");
+        assert_eq!(r(TipoFactura::R2, nif_iva), Ok(()));
+        refused(r(TipoFactura::R2, pasaporte), "1192");
+    }
+
+    /// AEAT 1112: never dated after the record's own generation.
+    #[test]
+    fn a_factura_is_never_issued_in_the_future() {
+        let ok = [iva_super()];
+        let ctx = EmissionContext {
+            descripcion_operacion: Some("venta"),
+            desglose: &ok,
+            ..EmissionContext::default()
+        };
+        let run = |on: &str, generado: &str| {
+            check_alta(
+                &ctx,
+                F2,
+                &fecha(on),
+                &FechaHuso::parse(generado).expect("an ISO instant"),
+                "T00000001",
+                Money::from_cents(121),
+            )
+            .map_err(|error| error.to_string())
+        };
+        assert_eq!(run(DAY, "2025-02-03T23:59:59+01:00"), Ok(()));
+        refused(run(DAY, "2025-02-02T23:59:59+01:00"), "1112");
     }
 
     #[test]
@@ -604,6 +702,12 @@ mod tests {
             ..line(0, 1000, 0)
         };
         assert_eq!(verdict(F1, DAY, std::slice::from_ref(&s2), |_| {}), Ok(()));
+        let s2_recargo = DetalleDesglose {
+            tipo_recargo_equivalencia: Some(Money::from_cents(520)),
+            cuota_recargo_equivalencia: Some(Money::ZERO),
+            ..s2.clone()
+        };
+        refused(verdict(F1, DAY, &[s2_recargo], |_| {}), "1281");
         refused(verdict(F2, DAY, &[s2], |_| {}), "§15.4");
         let n1_rated = DetalleDesglose {
             calificacion: Some(Calificacion::NoSujetaOtras),

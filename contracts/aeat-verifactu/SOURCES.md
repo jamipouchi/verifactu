@@ -29,6 +29,7 @@ the diff implies in one commit.
 | `AnexosEjemplosFirmaRegFact.zip` | no — its two XMLs are `fixtures/xades/golden/aeat-official/` | 5881 | `66fac533bef6c93c041b08704bf538843fe552052a2994899aba0875c2c4b24e` | `https://www.agenciatributaria.es/static_files/AEAT_Desarrolladores/EEDD/IVA/VERI-FACTU/Espec-Tecnicas/AnexosEjemplosFirmaRegFact.zip` |
 | `DetalleEspecificacTecnCodigoQRfactura.pdf` | no | 786534 | `f86b3c260d8a4963dbc18c5007732b53199156c5d1db63242e68db71501b49eb` | `https://www.agenciatributaria.es/static_files/AEAT_Desarrolladores/EEDD/IVA/VERI-FACTU/DetalleEspecificacTecnCodigoQRfactura.pdf` (v0.5.0: the QR law) |
 | `Validaciones_Errores_Veri-Factu.pdf` | no | 658946 | `426eb926fc098a36a163f66ca5f40d9e0847ca23300bbe5008979832d3513440` | `https://www.agenciatributaria.es/static_files/AEAT_Desarrolladores/EEDD/IVA/VERI-FACTU/Validaciones_Errores_Veri-Factu.pdf` (v1.2.2, 2026-04-08, retrieved 2026-10-11: which records AEAT rejects and which it accepts with errors — the law behind the gates in `fiscal/xml.rs`) |
+| `errores.properties` | no | 25232 | `06519ceb23422bd6b0ad3bfb659e3007615050da4920781d12cff536481d5902` | `https://www2.agenciatributaria.gob.es/static_files/common/internet/dep/aplicaciones/es/aeat/tikeV1.0/cont/ws/errores.properties` (ISO-8859-1, retrieved 2026-10-11: AEAT's complete error list, which Validaciones §4.4 names as the authority — rejection of the envío, rejection of the record, acceptance with errors; the gates cite its codes) |
 
 ## XAdES policy digest facts (for the `xades` policy registry)
 

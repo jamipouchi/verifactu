@@ -282,20 +282,22 @@ fn destinatario() -> impl Strategy<Value = IDDestinatario> {
         2 => "[A-Za-z]{2}".prop_map(Some),
         1 => text(3).prop_map(Some),
     ];
-    // AEAT's identification rules (§3.1.3.13): a Spanish IDOtro is a
-    // passport (03) or a no-censado NIF (07), 07 is always Spanish, and a
-    // NIF-IVA (02) has its member state's structure.
+    // AEAT's identification rules (§3.1.3.13, its error list): a Spanish
+    // IDOtro is a passport (03) or a no-censado natural person's NIF (07),
+    // 07 is always Spanish, a NIF-IVA (02) has its member state's
+    // structure, and every other IDOtro names its country.
     let otro = |id_type, codigo_pais: Option<&str>, id: String| IdOtro {
         codigo_pais: codigo_pais.map(str::to_owned),
         id_type,
         id,
     };
+    let dni = (0_u32..100_000_000).prop_map(|n| {
+        let letter = b"TRWAGMYFPDXBNJZSQVHLCKE"[(n % 23) as usize] as char;
+        format!("{n:08}{letter}")
+    });
     let coherent_otro = prop_oneof![
-        (
-            proptest::sample::select(vec![IdOtroType::Pasaporte, IdOtroType::NoCensado]),
-            text(20)
-        )
-            .prop_map(move |(id_type, id)| otro(id_type, Some("ES"), id)),
+        text(20).prop_map(move |id| otro(IdOtroType::Pasaporte, Some("ES"), id)),
+        dni.prop_map(move |id| otro(IdOtroType::NoCensado, Some("ES"), id)),
         "DE[0-9]{9}|FR[0-9A-Z]{11}|PT[0-9]{9}".prop_map(move |id| otro(
             IdOtroType::NifIva,
             None,
@@ -308,10 +310,10 @@ fn destinatario() -> impl Strategy<Value = IDDestinatario> {
                 IdOtroType::CertificadoResidencia,
                 IdOtroType::OtroDocumentoProbatorio
             ]),
-            proptest::option::of(proptest::sample::select(vec!["FR", "PT", "US", "DE", "MA"])),
+            proptest::sample::select(vec!["FR", "PT", "US", "DE", "MA"]),
             text(20)
         )
-            .prop_map(move |(id_type, pais, id)| otro(id_type, pais, id)),
+            .prop_map(move |(id_type, pais, id)| otro(id_type, Some(pais), id)),
     ];
     let arbitrary_otro =
         (pick::<IdOtroType>(), codigo_pais, text(20)).prop_map(|(id_type, codigo_pais, id)| {

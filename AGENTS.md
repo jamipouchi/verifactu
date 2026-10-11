@@ -91,8 +91,9 @@ A gate refuses exactly what AEAT would refuse. The cost is asymmetric:
   `0x1_0000..`.
 
 So every gate cites its law (an SI.xsd type, a section of AEAT's
-Validaciones document, an HS/SW/QR spec section, or "live-confirmed
-<date>" for behaviour observed at AEAT pruebas). Every gate is tested on
+Validaciones document or a code of its error list, `errores.properties`,
+an HS/SW/QR spec section, or "live-confirmed <date>" for behaviour
+observed at AEAT pruebas). Every gate is tested on
 **both** edges: what it admits and what it refuses. When AEAT's
 documents and AEAT's behaviour differ, follow the behaviour and record
 it in the comment.
@@ -128,6 +129,9 @@ Laws worth knowing before you touch `fiscal/xml.rs`:
   verbatim (`check_num_serie`).
 - **CodigoPais**: SI.xsd's `CountryType2` list (`CODIGOS_PAIS`,
   pinned to the XSD by a test).
+- **IDOtro** (every regime, `check_destinatario`): `CodigoPais` unless
+  NIF-IVA, which carries its state in its prefix; a no-censado (07) is
+  a Spanish natural person's NIF, control letter included.
 - **Amounts**: `Money` holds at most 2 decimals; `render_amount` is the
   one renderer for both wire and huella, and zero always renders
   unsigned.
