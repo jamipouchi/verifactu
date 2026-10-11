@@ -57,6 +57,7 @@ fn envelope_for_primer_alta() -> String {
         id_sistema_informatico: String::from("01"),
         version: String::from("0.1.0"),
         numero_instalacion: String::from("1"),
+        uso_posible: verifactu::UsoPosible::SoloVerifactu,
     };
     let desglose: &'static [DetalleDesglose] = Box::leak(Box::new([iva_super()]));
     let ctx = EmissionContext {

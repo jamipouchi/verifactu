@@ -41,6 +41,8 @@ fn sif() -> SistemaInformaticoConfig {
         id_sistema_informatico: String::from("01"),
         version: String::from("0.1.0"),
         numero_instalacion: String::from("1"),
+        // The conservation tests run this SIF too.
+        uso_posible: verifactu::UsoPosible::TambienNoVerifactu,
     }
 }
 

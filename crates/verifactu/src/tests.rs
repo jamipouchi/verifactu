@@ -14,7 +14,14 @@ fn productor() -> Obligado {
 }
 
 fn sif() -> SifConfig {
-    SifConfig::new(productor(), "mi-facturacion", "MF", "1.0.0").expect("valid SIF")
+    SifConfig::new(
+        productor(),
+        "mi-facturacion",
+        "MF",
+        "1.0.0",
+        crate::UsoPosible::SoloVerifactu,
+    )
+    .expect("valid SIF")
 }
 
 fn root() -> Verifactu {
@@ -72,7 +79,15 @@ fn the_endpoint_table_is_the_documented_eight() {
 /// id of A-Z/0-9 (no Ñ, no lowercase), a well-formed producer.
 #[test]
 fn the_sif_identity_validates_eagerly() {
-    let sif = |nombre: &str, id: &str| SifConfig::new(productor(), nombre, id, "1.0");
+    let sif = |nombre: &str, id: &str| {
+        SifConfig::new(
+            productor(),
+            nombre,
+            id,
+            "1.0",
+            crate::UsoPosible::SoloVerifactu,
+        )
+    };
     assert!(sif("x", "F1").is_ok());
     for id in ["FMA", "F", "", "f1", "Ñ1", "F-"] {
         assert!(sif("x", id).is_err(), "IdSistemaInformatico {id:?}");
@@ -90,7 +105,7 @@ fn the_sif_identity_validates_eagerly() {
         nif: String::from("B1122334"),
     };
     assert!(
-        SifConfig::new(unnamed, "x", "FM", "1.0").is_err(),
+        SifConfig::new(unnamed, "x", "FM", "1.0", crate::UsoPosible::SoloVerifactu).is_err(),
         "the producer's NIF"
     );
 }
@@ -160,6 +175,7 @@ async fn the_cancel_door_annuls_a_stored_cursor_and_chains() {
             id_sistema_informatico: String::from("FM"),
             version: String::from("1.2.0"),
             numero_instalacion: String::from("000042"),
+            uso_posible: crate::UsoPosible::SoloVerifactu,
         },
         std::sync::Arc::new(FakeSigner::new()),
     )
@@ -721,4 +737,53 @@ fn the_draft_gates_fire_as_invalid_input() {
             "the gate names its law ({law}): {error}"
         );
     }
+}
+
+/// Conservation is NO VERI*FACTU: a conservation tenant refuses a SIF
+/// declared `SoloVerifactu`, and one declaring `TambienNoVerifactu`
+/// renders `TipoUsoPosibleSoloVerifactu=N` on its records.
+#[tokio::test]
+async fn a_conservation_tenant_needs_a_sif_that_also_runs_no_verifactu() {
+    use crate::engine::{FakeSigner, FakeVerifactuTransport};
+    use crate::{lines, CertificateSource, InvoiceDraft, Modality, Series};
+    let connect = |sif: SifConfig| {
+        Verifactu::builder()
+            .sif(sif)
+            .build()
+            .expect("pruebas root")
+            .tenant(CertificateSource::Custom {
+                signer: std::sync::Arc::new(FakeSigner::new()),
+                transport: std::sync::Arc::new(FakeVerifactuTransport::new()),
+            })
+            .obligado(Obligado {
+                nombre_razon: String::from("ANA RUIZ PEREZ"),
+                nif: String::from("12345678Z"),
+            })
+            .modality(Modality::Conservation)
+            .connect()
+    };
+    let error = connect(sif()).expect_err("a SoloVerifactu SIF cannot conserve");
+    assert!(error.to_string().contains("NO VERI*FACTU"), "{error}");
+
+    let dual = SifConfig::new(
+        productor(),
+        "mi-facturacion",
+        "MF",
+        "1.0.0",
+        crate::UsoPosible::TambienNoVerifactu,
+    )
+    .expect("valid SIF");
+    let tenant = connect(dual).expect("a SIF that also runs NO VERI*FACTU conserves");
+    let emitted = tenant
+        .emit_invoice(
+            InvoiceDraft::new()
+                .serie(Series::T, 1)
+                .descripcion("venta mostrador")
+                .line(lines::sujeta_iva(2100, 1_000)),
+            None,
+        )
+        .await
+        .expect("the record is kept local");
+    assert!(emitted.emission.signed_records[0]
+        .contains("<sum1:TipoUsoPosibleSoloVerifactu>N</sum1:TipoUsoPosibleSoloVerifactu>"));
 }

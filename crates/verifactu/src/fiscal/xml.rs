@@ -142,7 +142,7 @@ fn sistema_informatico(sif: &SistemaInformaticoConfig) -> String {
     tag(
         &mut out,
         "sum1:TipoUsoPosibleSoloVerifactu",
-        TIPO_USO_POSIBLE_SOLO_VERIFACTU,
+        sif.uso_posible.wire(),
     );
     tag(
         &mut out,
@@ -158,14 +158,11 @@ fn sistema_informatico(sif: &SistemaInformaticoConfig) -> String {
     out
 }
 
-/// `S`, FIXED BY LAW: the field's axis is the PRODUCT FAMILY, never
-/// remission-vs-conservation (both are Veri*FACTU modalities).
-const TIPO_USO_POSIBLE_SOLO_VERIFACTU: &str = "S";
-
-/// `N`, FIXED BY LAW: one obligado tributario per installation.
+/// `N`: this crate keeps one obligado tributario per installation
+/// (`NumeroInstalacion`), so no installation can serve several.
 const TIPO_USO_POSIBLE_MULTI_OT: &str = "N";
 
-/// `N`, FIXED BY LAW: single-OT site.
+/// `N`: the installation serves a single obligado (see above).
 const INDICADOR_MULTIPLES_OT: &str = "N";
 
 /// Every `RegistroAnterior` field rides the record's seal-populated

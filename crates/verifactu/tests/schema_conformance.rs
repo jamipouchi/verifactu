@@ -534,6 +534,7 @@ fn sif(obligado: &Obligado, version: String) -> SistemaInformaticoConfig {
         id_sistema_informatico: String::from("MF"),
         version,
         numero_instalacion: String::from("000042"),
+        uso_posible: verifactu::UsoPosible::TambienNoVerifactu,
     }
 }
 

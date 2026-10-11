@@ -141,7 +141,7 @@ pub use crate::fiscal::transport::{
 pub use crate::fiscal::{
     CalificacionOperacion, ClaveRegimen, DetalleDesglose, Emission, EmitError, FacturaId,
     IDDestinatario, IdOtro, IdOtroType, IdentificacionDestinatario, ImporteRectificacion, Impuesto,
-    Modality, Obligado, OperacionExenta, TipoRectificativa,
+    Modality, Obligado, OperacionExenta, TipoRectificativa, UsoPosible,
 };
 pub use crate::qr::{
     verification_url, QR_ERROR_CORRECTION, QR_SIDE_MM, TRIBUTARY_CAPTION, VERIFIABLE_CAPTION,

@@ -29,9 +29,10 @@ fn parse_wire<E: IntoEnumIterator + Copy>(code: &str, wire: fn(E) -> &'static st
     E::iter().find(|&variant| wire(variant) == code)
 }
 
-/// Both are Veri*FACTU modalities: remission sends every record to AEAT
-/// as it is created; conservation keeps signed records locally and
-/// remits only bajo requerimiento.
+/// How the system runs. Remission is VERI*FACTU: every record goes to
+/// AEAT as it is created ("facturas verificables"). Conservation is NO
+/// VERI*FACTU: records are signed and kept locally, and remitted only
+/// bajo requerimiento (SW description §6.6; Validaciones §4.3.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Modality {
     Remission,
@@ -254,8 +255,7 @@ pub struct Obligado {
 /// The `SistemaInformatico` block: `nombre_razon`/`nif` name the
 /// PRODUCER of the invoicing software (AEAT Validaciones §3.1.5: "la
 /// persona o entidad productora del sistema informático"), not the
-/// obligado. Only the variable members: the fixed declarations are
-/// constants at the wire renderer (`xml::sistema_informatico`).
+/// obligado.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SistemaInformaticoConfig {
     pub nombre_razon: String,
@@ -264,6 +264,29 @@ pub struct SistemaInformaticoConfig {
     pub id_sistema_informatico: String,
     pub version: String,
     pub numero_instalacion: String,
+    /// What the software can run as (`TipoUsoPosibleSoloVerifactu`).
+    pub uso_posible: UsoPosible,
+}
+
+/// What the invoicing software can run as — the producer's declaration,
+/// `TipoUsoPosibleSoloVerifactu` on every record.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UsoPosible {
+    /// Only VERI*FACTU (remission): `S`.
+    SoloVerifactu,
+    /// Also NO VERI*FACTU (conservation, remitting bajo requerimiento):
+    /// `N`. A conservation emitter demands it.
+    TambienNoVerifactu,
+}
+
+impl UsoPosible {
+    #[must_use]
+    pub fn wire(self) -> &'static str {
+        match self {
+            Self::SoloVerifactu => "S",
+            Self::TambienNoVerifactu => "N",
+        }
+    }
 }
 
 impl SistemaInformaticoConfig {
@@ -583,6 +606,14 @@ impl VerifactuEmitter {
         xml::check_nif("ObligadoEmision/NIF", &obligado.nif)?;
         xml::check_text("ObligadoEmision/NombreRazon", &obligado.nombre_razon, 120)?;
         sif.validate()?;
+        if modality == Modality::Conservation && sif.uso_posible == UsoPosible::SoloVerifactu {
+            return Err(EmitError::InvalidRecord {
+                detail: String::from(
+                    "conservation is NO VERI*FACTU, but the SIF declares SoloVerifactu \
+                     (TipoUsoPosibleSoloVerifactu=S) — declare UsoPosible::TambienNoVerifactu",
+                ),
+            });
+        }
         Ok(Self {
             modality,
             obligado,
@@ -895,6 +926,7 @@ pub(crate) mod tests_support {
             id_sistema_informatico: String::from("01"),
             version: String::from("0.1.0"),
             numero_instalacion: String::from("1"),
+            uso_posible: super::UsoPosible::SoloVerifactu,
         }
     }
 

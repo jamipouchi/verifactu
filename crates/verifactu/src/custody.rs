@@ -75,6 +75,7 @@ impl<'a, 'r> TenantConnecting<'a, 'r> {
     }
 }
 
+#[derive(Debug)]
 pub struct TenantVerifactu {
     emitter: VerifactuEmitter,
 }

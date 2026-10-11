@@ -12,7 +12,7 @@ use crate::aeat::HttpVerifactuTransport;
 use crate::clock::{Clock, SystemClock};
 use crate::custody::{TenantConnecting, VendorConnecting};
 use crate::fiscal::transport::VerifactuTransport;
-use crate::fiscal::{Modality, Obligado, SistemaInformaticoConfig};
+use crate::fiscal::{Modality, Obligado, SistemaInformaticoConfig, UsoPosible};
 use crate::signer::FiscalSigner;
 
 const PRODUCTION_ENV_KEY: &str = "VERIFACTU_ALLOW_PRODUCTION";
@@ -71,12 +71,14 @@ pub struct SifConfig {
     nombre_sistema_informatico: String,
     id_sistema_informatico: String,
     version: String,
+    uso_posible: UsoPosible,
 }
 
 impl SifConfig {
     /// `productor` is the person or entity that produces the invoicing
     /// software — the same on every tenant's records — then the system's
-    /// name, two-position id and version.
+    /// name, two-position id and version, and what it can run as
+    /// (conservation, NO VERI*FACTU, demands `TambienNoVerifactu`).
     ///
     /// # Errors
     /// [`VerifactuError::Identity`] naming the field, per
@@ -86,12 +88,14 @@ impl SifConfig {
         nombre: &str,
         id: &str,
         version: &str,
+        uso_posible: UsoPosible,
     ) -> Result<Self, VerifactuError> {
         let sif = Self {
             productor,
             nombre_sistema_informatico: nombre.to_owned(),
             id_sistema_informatico: id.to_owned(),
             version: version.to_owned(),
+            uso_posible,
         };
         if version.is_empty() {
             return Err(VerifactuError::Identity(String::from(
@@ -113,6 +117,7 @@ impl SifConfig {
             id_sistema_informatico: self.id_sistema_informatico.clone(),
             version: self.version.clone(),
             numero_instalacion: installation.to_owned(),
+            uso_posible: self.uso_posible,
         }
     }
 }
