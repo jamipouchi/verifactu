@@ -186,7 +186,54 @@ fn pick<E: IntoEnumIterator + Clone + std::fmt::Debug + 'static>() -> impl Strat
     proptest::sample::select(E::iter().collect::<Vec<_>>())
 }
 
-fn detalle() -> impl Strategy<Value = DetalleDesglose> {
+/// A line AEAT admits — built by the crate's own `lines` helpers over
+/// admitted rates, recargo pairs, exemptions and N1/N2 — or, rarely, any
+/// combination of fields at all.
+fn detalle() -> BoxedStrategy<DetalleDesglose> {
+    let base = prop_oneof![9 => -100_000_i64..=100_000, 1 => -10_000_000_i64..=10_000_000];
+    let coherent = prop_oneof![
+        (
+            proptest::sample::select(vec![0_i64, 400, 1000, 2100]),
+            base.clone()
+        )
+            .prop_map(|(rate, base)| verifactu::lines::sujeta_iva(rate, base)),
+        (
+            proptest::sample::select(vec![
+                (2100_i64, 520_i64),
+                (2100, 175),
+                (1000, 140),
+                (400, 50)
+            ]),
+            base.clone()
+        )
+            .prop_map(
+                |((rate, recargo), base)| verifactu::lines::sujeta_iva_recargo(rate, recargo, base)
+            ),
+        (
+            proptest::sample::select(vec![
+                OperacionExenta::E1,
+                OperacionExenta::E2,
+                OperacionExenta::E3,
+                OperacionExenta::E4,
+                OperacionExenta::E5,
+                OperacionExenta::E6
+            ]),
+            base.clone()
+        )
+            .prop_map(|(exenta, base)| verifactu::lines::exenta(exenta, base)),
+        (
+            proptest::sample::select(vec![
+                CalificacionOperacion::NoSujetaOtras,
+                CalificacionOperacion::NoSujetaLocalizacion
+            ]),
+            base
+        )
+            .prop_map(|(calificacion, base)| verifactu::lines::no_sujeta(calificacion, base)),
+    ];
+    prop_oneof![WILD => coherent, 1 => arbitrary_detalle()].boxed()
+}
+
+fn arbitrary_detalle() -> impl Strategy<Value = DetalleDesglose> {
     (
         proptest::option::of(pick::<Impuesto>()),
         proptest::option::weighted(0.99, pick::<ClaveRegimen>()),
@@ -235,9 +282,35 @@ fn destinatario() -> impl Strategy<Value = IDDestinatario> {
         2 => "[A-Za-z]{2}".prop_map(Some),
         1 => text(3).prop_map(Some),
     ];
+    // AEAT's identification pairs (§3.1.3.13): a Spanish IDOtro is a
+    // passport (03) or a no-censado NIF (07), and 07 is always Spanish.
+    let coherent_otro = prop_oneof![
+        (
+            proptest::sample::select(vec![IdOtroType::Pasaporte, IdOtroType::NoCensado]),
+            Just(Some(String::from("ES")))
+        ),
+        (
+            proptest::sample::select(vec![
+                IdOtroType::NifIva,
+                IdOtroType::Pasaporte,
+                IdOtroType::IdPaisResidencia,
+                IdOtroType::CertificadoResidencia,
+                IdOtroType::OtroDocumentoProbatorio
+            ]),
+            prop_oneof![
+                Just(None),
+                proptest::sample::select(vec!["FR", "PT", "US", "DE", "MA"])
+                    .prop_map(|c| Some(c.to_owned()))
+            ]
+        ),
+    ];
+    let otro = prop_oneof![
+        WILD => coherent_otro,
+        1 => (pick::<IdOtroType>(), codigo_pais),
+    ];
     let identificacion = prop_oneof![
         nif().prop_map(IdentificacionDestinatario::Nif),
-        (codigo_pais, pick::<IdOtroType>(), text(20)).prop_map(|(codigo_pais, id_type, id)| {
+        (otro, text(20)).prop_map(|((id_type, codigo_pais), id)| {
             IdentificacionDestinatario::Otro(IdOtro {
                 codigo_pais,
                 id_type,
@@ -373,17 +446,28 @@ fn alta_input() -> impl Strategy<Value = AltaInput> {
                 ]
                 .boxed()
             } else {
-                proptest::collection::vec(destinatario(), 0..=2).boxed()
+                prop_oneof![
+                    WILD => Just(Vec::new()),
+                    1 => proptest::collection::vec(destinatario(), 0..=2),
+                ]
+                .boxed()
             };
             let lines = prop_oneof![
                 WILD => proptest::collection::vec(detalle(), 1..=4),
                 1 => proptest::collection::vec(detalle(), 0..=13),
             ];
-            let flags = (
-                proptest::option::of(pick_si_no()),
-                proptest::option::of(pick::<RechazoPrevio>()),
-                proptest::option::of(pick_si_no()),
-            );
+            // RechazoPrevio S/X rides a subsanación only (§3.1.3.2).
+            let correction = prop_oneof![
+                WILD => Just((None, None)),
+                WILD => proptest::option::of(pick::<RechazoPrevio>())
+                    .prop_map(|rechazo| (Some(SiNo::Si), rechazo)),
+                1 => (
+                    proptest::option::of(pick_si_no()),
+                    proptest::option::of(pick::<RechazoPrevio>())
+                ),
+            ];
+            let flags = (correction, proptest::option::of(pick_si_no()))
+                .prop_map(|((subsanacion, rechazo), macrodato)| (subsanacion, rechazo, macrodato));
             (
                 (
                     Just(tipo),

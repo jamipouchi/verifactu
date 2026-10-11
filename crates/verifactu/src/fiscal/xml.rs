@@ -3,13 +3,13 @@
 //! its own `xmlns:sum1` (AEAT's own signed example's shape) so a signed
 //! record stays digest-stable under DOM extraction at AEAT.
 
-use crate::domain::chain::{render_amount, ChainKind, ChainRecord, TipoFactura};
+use crate::domain::chain::{render_amount, ChainKind, ChainRecord};
 use crate::domain::money::Money;
 use crate::domain::series;
 
 use crate::fiscal::{
-    DetalleDesglose, EmissionContext, IdentificacionDestinatario, Impuesto, Obligado,
-    SistemaInformaticoConfig, TipoRectificativa,
+    rules, DetalleDesglose, EmissionContext, IdOtroType, IdentificacionDestinatario, Modality,
+    Obligado, RechazoPrevio, SistemaInformaticoConfig,
 };
 
 pub(crate) const NS_SUMINISTRO: &str = "https://www2.agenciatributaria.gob.es/static_files/common/internet/dep/aplicaciones/es/aeat/tike/cont/ws/SuministroInformacion.xsd";
@@ -320,6 +320,7 @@ pub(crate) fn registro_alta(
     ctx: &EmissionContext<'_>,
     obligado: &Obligado,
     sif: &SistemaInformaticoConfig,
+    modality: Modality,
 ) -> Result<String, SerializeError> {
     let ChainKind::Alta {
         issuer,
@@ -337,16 +338,18 @@ pub(crate) fn registro_alta(
             problem: String::from("record kind is not Alta"),
         });
     };
-    check_alta(
-        ctx,
-        obligado,
-        issuer,
-        *tipo_factura,
-        *cuota_total,
-        *importe_total,
-    )?;
+    check_alta(ctx, obligado, issuer, *cuota_total, *importe_total)?;
     let num_serie = series::format(serie, *number);
     check_num_serie("IDFactura/NumSerieFactura", &num_serie)?;
+    if modality == Modality::Remission {
+        rules::check_alta(
+            ctx,
+            *tipo_factura,
+            fecha_expedicion,
+            &num_serie,
+            *importe_total,
+        )?;
+    }
     let descripcion = ctx
         .descripcion_operacion
         .expect("check_alta established the descripcion");
@@ -378,6 +381,8 @@ pub(crate) fn registro_alta(
     tag(&mut out, "sum1:TipoFactura", tipo_factura.as_str());
     if let Some(tipo_rect) = ctx.tipo_rectificativa {
         tag(&mut out, "sum1:TipoRectificativa", tipo_rect.wire());
+    }
+    if !ctx.facturas_rectificadas.is_empty() {
         out.push_str("<sum1:FacturasRectificadas>");
         for rectificada in ctx.facturas_rectificadas {
             out.push_str("<sum1:IDFacturaRectificada>");
@@ -471,7 +476,6 @@ fn check_alta(
     ctx: &EmissionContext<'_>,
     obligado: &Obligado,
     issuer: &str,
-    tipo_factura: TipoFactura,
     cuota_total: Money,
     importe_total: Money,
 ) -> Result<(), SerializeError> {
@@ -497,9 +501,9 @@ fn check_alta(
     };
     check_text("DescripcionOperacion", descripcion, 500)?;
     check_text("NombreRazonEmisor", &obligado.nombre_razon, 120)?;
-    // DELIBERATE non-check: totals are NOT cross-checked against the
-    // desglose — AEAT's own signed example carries cuotas summing 31.4
-    // against a declared CuotaTotal of 41.4.
+    // DELIBERATE non-check: the totals are not cross-checked against the
+    // desglose — AEAT only warns past ±10,00 (Validaciones §16–17), and
+    // its own signed example declares 41.4 over cuotas summing 31.4.
     check_importe_sgn_12_2("CuotaTotal", cuota_total)?;
     check_importe_sgn_12_2("ImporteTotal", importe_total)?;
     if ctx.desglose.is_empty() || ctx.desglose.len() > 12 {
@@ -511,36 +515,6 @@ fn check_alta(
     if let Some(ref_ext) = ctx.ref_externa {
         check_text("RefExterna", ref_ext, 60)?;
     }
-    let rectificativa = tipo_factura.is_rectificativa();
-    if rectificativa && ctx.tipo_rectificativa.is_none() {
-        return Err(SerializeError::Cardinality {
-            element: "TipoRectificativa",
-            problem: format!(
-                "TipoFactura {} is rectificativa — the rectification block is \
-                 required (TipoRectificativa S/I + the rectified invoices; on the \
-                 flat face, InvoiceDraft::rectificativa)",
-                tipo_factura.as_str()
-            ),
-        });
-    }
-    if rectificativa && ctx.facturas_rectificadas.is_empty() {
-        return Err(SerializeError::Cardinality {
-            element: "FacturasRectificadas",
-            problem: String::from(
-                "at least one IDFacturaRectificada is required on rectificativa records",
-            ),
-        });
-    }
-    if !rectificativa && (ctx.tipo_rectificativa.is_some() || !ctx.facturas_rectificadas.is_empty())
-    {
-        return Err(SerializeError::Cardinality {
-            element: "TipoRectificativa",
-            problem: format!(
-                "TipoFactura {} is not rectificativa — no rectification data allowed",
-                tipo_factura.as_str()
-            ),
-        });
-    }
     for rectificada in ctx.facturas_rectificadas {
         check_nif("IDFacturaRectificada/IDEmisorFactura", &rectificada.nif)?;
         check_num_serie(
@@ -548,74 +522,52 @@ fn check_alta(
             &rectificada.num_serie,
         )?;
     }
-    // Validaciones §3.6: obligatory on Sustitutiva, forbidden otherwise.
-    match (ctx.tipo_rectificativa, &ctx.importe_rectificacion) {
-        (Some(TipoRectificativa::Sustitutiva), None) => {
-            return Err(SerializeError::Cardinality {
-                element: "ImporteRectificacion",
-                problem: String::from(
-                    "required when TipoRectificativa is Sustitutiva (the substituted \
-                     BaseRectificada/CuotaRectificada must ride the record)",
-                ),
-            });
-        }
-        (Some(TipoRectificativa::Incremental), Some(_)) => {
-            return Err(SerializeError::Cardinality {
-                element: "ImporteRectificacion",
-                problem: String::from(
-                    "forbidden when TipoRectificativa is Incremental (only sustitutivas \
-                     carry the substituted amounts)",
-                ),
-            });
-        }
-        (None, Some(_)) => {
-            return Err(SerializeError::Cardinality {
-                element: "ImporteRectificacion",
-                problem: String::from(
-                    "forbidden on non-rectificativa records (only sustitutivas carry the \
-                     substituted amounts)",
-                ),
-            });
-        }
-        _ => {}
+    for destinatario in ctx.destinatarios {
+        check_destinatario(destinatario)?;
     }
-    if tipo_factura.requires_destinatario() && ctx.destinatarios.is_empty() {
-        return Err(SerializeError::Cardinality {
-            element: "Destinatarios",
-            problem: format!(
-                "TipoFactura {} requires the Destinatarios block (AEAT 1189) — the \
-                 counterparty must ride the record",
-                tipo_factura.as_str()
+    Ok(())
+}
+
+/// One destinatario's syntax and identification — the rules AEAT applies
+/// in every regime (§4.3.2 keeps NIF/IDOtro identification even bajo
+/// requerimiento).
+fn check_destinatario(destinatario: &crate::fiscal::IDDestinatario) -> Result<(), SerializeError> {
+    check_text(
+        "IDDestinatario/NombreRazon",
+        &destinatario.nombre_razon,
+        120,
+    )?;
+    let otro = match &destinatario.identificacion {
+        IdentificacionDestinatario::Nif(nif) => return check_nif("IDDestinatario/NIF", nif),
+        IdentificacionDestinatario::Otro(otro) => otro,
+    };
+    if let Some(pais) = &otro.codigo_pais {
+        if CODIGOS_PAIS.binary_search(&pais.as_str()).is_err() {
+            return Err(SerializeError::Field {
+                field: "IDDestinatario/IDOtro/CodigoPais",
+                problem: format!(
+                    "{pais:?} is not a CountryType2 code (uppercase ISO 3166-1 alpha-2)"
+                ),
+            });
+        }
+    }
+    let spanish = otro.codigo_pais.as_deref() == Some("ES");
+    if otro.id_type == IdOtroType::NoCensado && !spanish {
+        return Err(SerializeError::Field {
+            field: "IDDestinatario/IDOtro/CodigoPais",
+            problem: String::from("IDType 07 (no censado) requires CodigoPais ES (§3.1.3.13)"),
+        });
+    }
+    if spanish && !matches!(otro.id_type, IdOtroType::Pasaporte | IdOtroType::NoCensado) {
+        return Err(SerializeError::Field {
+            field: "IDDestinatario/IDOtro/IDType",
+            problem: String::from(
+                "a Spanish IDOtro is a passport (03) or a no-censado NIF (07) — a NIF rides \
+                 NIF (§3.1.3.13)",
             ),
         });
     }
-    for destinatario in ctx.destinatarios {
-        check_text(
-            "IDDestinatario/NombreRazon",
-            &destinatario.nombre_razon,
-            120,
-        )?;
-        match &destinatario.identificacion {
-            IdentificacionDestinatario::Nif(nif) => {
-                check_nif("IDDestinatario/NIF", nif)?;
-            }
-            IdentificacionDestinatario::Otro(otro) => {
-                if let Some(pais) = &otro.codigo_pais {
-                    if CODIGOS_PAIS.binary_search(&pais.as_str()).is_err() {
-                        return Err(SerializeError::Field {
-                            field: "IDDestinatario/IDOtro/CodigoPais",
-                            problem: format!(
-                                "{pais:?} is not a CountryType2 code (uppercase ISO 3166-1 \
-                                 alpha-2)"
-                            ),
-                        });
-                    }
-                }
-                check_text("IDDestinatario/IDOtro/ID", &otro.id, 20)?;
-            }
-        }
-    }
-    Ok(())
+    check_text("IDDestinatario/IDOtro/ID", &otro.id, 20)
 }
 
 fn check_detalle(detalle: &DetalleDesglose) -> Result<(), SerializeError> {
@@ -625,19 +577,6 @@ fn check_detalle(detalle: &DetalleDesglose) -> Result<(), SerializeError> {
             problem: String::from(
                 "exactly one of CalificacionOperacion or OperacionExenta is required (the \
                  DetalleType choice)",
-            ),
-        });
-    }
-    // AEAT validation 1245 (live-confirmed at pruebas 2026-10-05): when
-    // Impuesto is ABSENT or IVA/IPSI/IGIC, ClaveRegimen is required —
-    // only Impuesto `05` (otros) may ride without one.
-    let clave_required = !matches!(detalle.impuesto, Some(Impuesto::Otros));
-    if clave_required && detalle.clave_regimen.is_none() {
-        return Err(SerializeError::Cardinality {
-            element: "DetalleDesglose/ClaveRegimen",
-            problem: format!(
-                "required when Impuesto is absent or IVA/IPSI/IGIC (AEAT 1245), got {:?}",
-                detalle.impuesto
             ),
         });
     }
@@ -722,6 +661,14 @@ pub(crate) fn registro_anulacion(
     obligado: &Obligado,
     sif: &SistemaInformaticoConfig,
 ) -> Result<String, SerializeError> {
+    if ctx.rechazo_previo == Some(RechazoPrevio::NoRemitido) {
+        return Err(SerializeError::Field {
+            field: "RegistroAnulacion/RechazoPrevio",
+            problem: String::from(
+                "an anulación's RechazoPrevio is S or N (RechazoPrevioAnulacionType)",
+            ),
+        });
+    }
     let ChainKind::Anulacion {
         issuer,
         serie,
@@ -771,6 +718,9 @@ pub(crate) fn registro_anulacion(
     }
     if let Some(sin_previo) = ctx.sin_registro_previo {
         tag(&mut out, "sum1:SinRegistroPrevio", sin_previo.wire());
+    }
+    if let Some(rechazo) = ctx.rechazo_previo {
+        tag(&mut out, "sum1:RechazoPrevio", rechazo.wire());
     }
     out.push_str(&encadenamiento(record)?);
     out.push_str(&sistema_informatico(sif));
@@ -898,6 +848,11 @@ pub fn registro_evento(signed_evento: &str) -> String {
     out
 }
 
+/// One record's unsigned node. `modality` picks AEAT's law: remission
+/// refuses every business error AEAT would reject; bajo requerimiento
+/// AEAT admits them (Validaciones §4.3.2), so only the schema, the
+/// identification rules and the chain's own invariants apply.
+///
 /// # Errors
 /// [`SerializeError`] per the record's kind.
 pub fn record_node(
@@ -905,9 +860,10 @@ pub fn record_node(
     ctx: &EmissionContext<'_>,
     obligado: &Obligado,
     sif: &SistemaInformaticoConfig,
+    modality: Modality,
 ) -> Result<String, SerializeError> {
     match &record.kind {
-        ChainKind::Alta { .. } => registro_alta(record, ctx, obligado, sif),
+        ChainKind::Alta { .. } => registro_alta(record, ctx, obligado, sif, modality),
         ChainKind::Anulacion { .. } => registro_anulacion(record, ctx, obligado, sif),
         ChainKind::Evento { .. } => Err(SerializeError::Field {
             field: "record_node",
@@ -1251,6 +1207,7 @@ mod tests {
 
     use super::{check_text, escape_text, parse_tree, registro_alta, EmissionContext, Tree};
     use crate::fiscal::tests_support::{iva_super, obligado, primer_alta_record, sif};
+    use crate::fiscal::Modality;
 
     /// No live bench leg exercises escaping.
     #[test]
@@ -1261,8 +1218,14 @@ mod tests {
             desglose: &desglose,
             ..EmissionContext::default()
         };
-        let node =
-            registro_alta(&primer_alta_record(), &ctx, &obligado(), &sif()).expect("serializes");
+        let node = registro_alta(
+            &primer_alta_record(),
+            &ctx,
+            &obligado(),
+            &sif(),
+            Modality::Remission,
+        )
+        .expect("serializes");
         assert!(
             node.contains(
                 "<sum1:DescripcionOperacion>Venta &amp; devolución &lt;2 uds&gt; al contado\
@@ -1369,8 +1332,14 @@ mod tests {
             desglose: &desglose,
             ..EmissionContext::default()
         };
-        let node =
-            registro_alta(&primer_alta_record(), &ctx, &obligado(), &sif()).expect("serializes");
+        let node = registro_alta(
+            &primer_alta_record(),
+            &ctx,
+            &obligado(),
+            &sif(),
+            Modality::Remission,
+        )
+        .expect("serializes");
         let tree = parse_tree(&node).expect("reads back");
         let read = find(&tree, "DescripcionOperacion").expect("element present");
         assert_eq!(read.text, descripcion);

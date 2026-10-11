@@ -45,12 +45,18 @@ pub mod lines {
         }
     }
 
-    /// An exempt line (`E1`..`E8`).
+    /// An IVA-exempt line (`E1`..`E6`; `E7`/`E8` are IGIC's). Exports
+    /// (`E2`, `E3`) ride `ClaveRegimen` 02 — AEAT refuses them under 01
+    /// (Validaciones §15.5).
     #[must_use]
     pub fn exenta(exenta: crate::fiscal::OperacionExenta, base_cents: i64) -> DetalleDesglose {
+        use crate::fiscal::{ClaveRegimen, OperacionExenta};
         DetalleDesglose {
             impuesto: Some(crate::fiscal::Impuesto::Iva),
-            clave_regimen: Some(crate::fiscal::ClaveRegimen::C01),
+            clave_regimen: Some(match exenta {
+                OperacionExenta::E2 | OperacionExenta::E3 => ClaveRegimen::C02,
+                _ => ClaveRegimen::C01,
+            }),
             calificacion: None,
             operacion_exenta: Some(exenta),
             tipo_impositivo: None,
@@ -58,6 +64,27 @@ pub mod lines {
             cuota_repercutida: None,
             tipo_recargo_equivalencia: None,
             cuota_recargo_equivalencia: None,
+        }
+    }
+
+    /// An IVA line under recargo de equivalencia: `rate_cents` (2100 =
+    /// 21,00 %) and `recargo_rate_cents` (520 = 5,20 %) over `base_cents`,
+    /// both cuotas computed from their pair. AEAT admits only the
+    /// recargo each rate pairs with (21 → 5,2 or 1,75; 10 → 1,4; 4 → 0,5;
+    /// Validaciones §15.3).
+    #[must_use]
+    pub fn sujeta_iva_recargo(
+        rate_cents: i64,
+        recargo_rate_cents: i64,
+        base_cents: i64,
+    ) -> DetalleDesglose {
+        DetalleDesglose {
+            tipo_recargo_equivalencia: Some(Money::from_cents(recargo_rate_cents)),
+            cuota_recargo_equivalencia: Some(Money::from_cents(cuota_cents(
+                recargo_rate_cents,
+                base_cents,
+            ))),
+            ..sujeta_iva(rate_cents, base_cents)
         }
     }
 
@@ -223,11 +250,6 @@ impl InvoiceDraft {
                 )));
             }
         };
-        if tipo.requires_destinatario() && self.destinatarios.is_empty() {
-            return Err(invalid(format!(
-                "TipoFactura {tipo:?} requires its destinatario (AEAT 1189)"
-            )));
-        }
         // Totals cohere by construction: Σ cuotas (incl. recargo) and
         // Σ base + Σ cuotas.
         let base_total: i64 = self

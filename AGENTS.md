@@ -21,7 +21,9 @@ crates/verifactu/src/
   domain/                   pure core: chain (huella, ChainRecord, verify_chain), Money, Series
   fiscal/                   the emission engine
     mod.rs                  vocabularies, EmissionContext, EmitError, VerifactuEmitter
-    xml.rs                  wire serializer, every field gate, the read-side tree parser
+    xml.rs                  wire serializer, the gates every regime applies (schema,
+                            syntax, identification), the read-side tree parser
+    rules.rs                AEAT's business rules (Validaciones §3.1.3, §15), remission only
     consulta.rs             the consulta operation (request, read-back, huella audit)
     response.rs             respuesta parsing + the Disposition classifier
     transport.rs            the VerifactuTransport port and the read edge
@@ -88,11 +90,29 @@ A gate refuses exactly what AEAT would refuse. The cost is asymmetric:
   because the `Char` predicate's last range was `0x10_0000..` instead of
   `0x1_0000..`.
 
-So every gate cites its law (an SI.xsd type, an AEAT validation code,
-an HS/SW/QR spec section, or "live-confirmed <date>" for behaviour
-observed at AEAT pruebas). Every gate is tested on **both** edges: what
-it admits and what it refuses. When AEAT's documents and AEAT's
-behaviour differ, follow the behaviour and record it in the comment.
+So every gate cites its law (an SI.xsd type, a section of AEAT's
+Validaciones document, an HS/SW/QR spec section, or "live-confirmed
+<date>" for behaviour observed at AEAT pruebas). Every gate is tested on
+**both** edges: what it admits and what it refuses. When AEAT's
+documents and AEAT's behaviour differ, follow the behaviour and record
+it in the comment.
+
+What AEAT refuses depends on the regime (Validaciones §4):
+
+- **Remisión voluntaria** (`Modality::Remission`): schema, syntax and
+  every business rule reject the record — all of `rules.rs` applies.
+  Only the listed "admisible" errors pass with a warning (the
+  CuotaTotal/ImporteTotal sums, the huella, `PrimerRegistro`, a future
+  `FechaHoraHusoGenRegistro`, a "no censado" destinatario); never refuse
+  those.
+- **Bajo requerimiento** (`Modality::Conservation`): business errors are
+  admissible — conserved records travel as generated — so only the
+  schema, syntax and NIF/IDOtro identification apply, plus the crate's
+  own invariants (issuer = obligado, a huella-safe NumSerieFactura).
+
+`record_node` takes the modality for exactly this reason. A new AEAT
+rule goes in `rules.rs` if it is a business rule, in `xml.rs` if every
+regime enforces it.
 
 Laws worth knowing before you touch `fiscal/xml.rs`:
 

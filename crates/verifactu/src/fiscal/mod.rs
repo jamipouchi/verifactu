@@ -6,6 +6,7 @@ pub mod consulta;
 pub mod events;
 pub mod huso;
 pub mod response;
+mod rules;
 pub mod transport;
 pub mod xml;
 
@@ -840,7 +841,8 @@ impl VerifactuEmitter {
                     ),
                 });
             }
-            let unsigned = xml::record_node(record, context, &self.obligado, &self.sif)?;
+            let unsigned =
+                xml::record_node(record, context, &self.obligado, &self.sif, self.modality)?;
             let signed = if Self::must_sign(self.modality, &record.kind) {
                 self.signer.sign_xades_epes(&unsigned)?
             } else {
@@ -981,8 +983,14 @@ mod tests {
             super::tests_support::obligado(),
             super::tests_support::sif(),
         );
-        let node = super::xml::record_node(&primer_alta_record(), &alta_ctx(), &obligado, &sif)
-            .expect("serializes");
+        let node = super::xml::record_node(
+            &primer_alta_record(),
+            &alta_ctx(),
+            &obligado,
+            &sif,
+            Modality::Remission,
+        )
+        .expect("serializes");
         let doc = super::xml::reg_factu_document(
             &obligado,
             Some(&Obligado {

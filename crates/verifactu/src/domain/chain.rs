@@ -197,6 +197,7 @@ pub fn render_amount(amount: Money) -> String {
 pub struct FechaExpedicion(String);
 
 impl FechaExpedicion {
+    /// `dd-mm-yyyy` naming a real calendar day — `31-02-2025` is not one.
     #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
         let bytes = value.as_bytes();
@@ -205,7 +206,21 @@ impl FechaExpedicion {
                 2 | 5 => byte == b'-',
                 _ => byte.is_ascii_digit(),
             });
-        structural.then(|| Self(String::from(value)))
+        if !structural {
+            return None;
+        }
+        let fecha = Self(String::from(value));
+        let (year, month, day) = fecha.ymd();
+        ((1..=12).contains(&month)
+            && (1..=crate::clock::civil::days_in_month(year, month)).contains(&day))
+        .then_some(fecha)
+    }
+
+    /// `(year, month, day)` — ordered as dates are.
+    #[must_use]
+    pub fn ymd(&self) -> (i64, u32, u32) {
+        let field = |range: std::ops::Range<usize>| self.0[range].parse::<u32>().unwrap_or(0);
+        (i64::from(field(6..10)), field(3..5), field(0..2))
     }
 
     #[must_use]
