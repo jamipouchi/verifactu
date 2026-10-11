@@ -341,6 +341,16 @@ pub struct FacturaId {
     pub fecha_expedicion: FechaExpedicion,
 }
 
+/// Whether a foreign `id` is a member state's NIF-IVA as AEAT checks it
+/// on the factura's date (Validaciones §3.1.3.13, Nota 1): the uppercase
+/// state prefix, then that state's number. Such a destinatario rides
+/// [`IdOtroType::NifIva`] and needs no `CodigoPais`; any other foreign
+/// identifier names its country.
+#[must_use]
+pub fn is_nif_iva(id: &str, fecha: &FechaExpedicion) -> bool {
+    xml::is_nif_iva(id, fecha.ymd())
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, strum::EnumIter)]
 pub enum IdOtroType {
     NifIva,

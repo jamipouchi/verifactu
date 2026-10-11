@@ -538,7 +538,7 @@ fn check_alta(
 /// validates it (Validaciones §3.1.3.13, Nota 1): the uppercase country
 /// prefix, then the number. Northern Ireland: `GB` before 2021, `GB` or
 /// `XI` in January 2021, `XI` after.
-fn is_nif_iva(id: &str, fecha: (i64, u32, u32)) -> bool {
+pub(crate) fn is_nif_iva(id: &str, fecha: (i64, u32, u32)) -> bool {
     let (Some(prefix), Some(number)) = (id.get(..2), id.get(2..)) else {
         return false;
     };
