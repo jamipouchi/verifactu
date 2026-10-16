@@ -83,9 +83,12 @@ Consumers that keep their own durable chain seal records themselves
 (`engine::ChainRecord::seal`) and submit them in envíos of up to 1000
 through `engine::VerifactuEmitter::submit`; `engine::verify_chain`
 audits a stored chain (every huella recomputes, every record sealed onto
-the one before). One signing port serves both faces: `FiscalSigner`,
-implemented by `engine::XadesSigner`, your own KMS/HSM signer, or
-— in tests, feature `fakes` — `engine::FakeSigner`.
+the one before). `engine::HttpVerifactuTransport` dials the endpoint
+you name; `refusing_stand_ins(mark)` refuses every answer carrying
+your stand-ins' mark header, so a build that must reach AEAT never
+reads a fake's verdict as AEAT's. One signing port serves both faces:
+`FiscalSigner`, implemented by `engine::XadesSigner`, your own KMS/HSM
+signer, or — in tests, feature `fakes` — `engine::FakeSigner`.
 
 ### Edge runtimes (wasm32: Cloudflare Workers and kin)
 

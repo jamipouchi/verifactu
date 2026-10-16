@@ -27,6 +27,8 @@ pub enum WireBuildError {
     Endpoint(String),
     #[error("verifactu client identity rejected: {0}")]
     Identity(String),
+    #[error("verifactu stand-in mark is no HTTP header name: {0}")]
+    Mark(String),
 }
 
 /// One AEAT endpoint, one client identity per pool.
@@ -35,12 +37,14 @@ pub struct HttpVerifactuTransport {
     client: HttpWireClient,
     endpoint: http::Uri,
     timeout: Duration,
+    stand_in_mark: Option<http::HeaderName>,
 }
 
 impl std::fmt::Debug for HttpVerifactuTransport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HttpVerifactuTransport")
             .field("endpoint", &self.endpoint.to_string())
+            .field("stand_in_mark", &self.stand_in_mark)
             .finish_non_exhaustive()
     }
 }
@@ -56,6 +60,7 @@ impl HttpVerifactuTransport {
             client: HttpWireClient::new(request_timeout),
             endpoint,
             timeout: request_timeout,
+            stand_in_mark: None,
         })
     }
 
@@ -63,8 +68,7 @@ impl HttpVerifactuTransport {
     pub fn with_roots(self, roots: rustls::RootCertStore) -> Self {
         Self {
             client: HttpWireClient::with_roots(roots, self.timeout),
-            endpoint: self.endpoint,
-            timeout: self.timeout,
+            ..self
         }
     }
 
@@ -88,24 +92,31 @@ impl HttpVerifactuTransport {
             .client
             .with_client_cert(chain, key)
             .map_err(|e| WireBuildError::Identity(e.to_string()))?;
+        Ok(Self { client, ..self })
+    }
+
+    /// The same transport, refusing every answer that carries the `mark`
+    /// header: the mark a deployment's stand-ins (its fake AEAT, a
+    /// bench) put on their answers, so a build that must reach AEAT never
+    /// reads a stand-in's verdict as AEAT's, wherever the endpoint points.
+    /// AEAT sends no such header. A refused answer is a
+    /// [`TransportFailure`], as for any exchange that did not reach AEAT.
+    ///
+    /// # Errors
+    /// [`WireBuildError::Mark`] when `mark` is no HTTP header name.
+    pub fn refusing_stand_ins(self, mark: &str) -> Result<Self, WireBuildError> {
+        let mark =
+            http::HeaderName::try_from(mark).map_err(|e| WireBuildError::Mark(e.to_string()))?;
         Ok(Self {
-            client,
-            endpoint: self.endpoint,
-            timeout: self.timeout,
+            stand_in_mark: Some(mark),
+            ..self
         })
     }
 
     #[must_use]
     pub fn recording(self) -> (Self, Recorder) {
         let (client, recorder) = self.client.recording();
-        (
-            Self {
-                client,
-                endpoint: self.endpoint,
-                timeout: self.timeout,
-            },
-            recorder,
-        )
+        (Self { client, ..self }, recorder)
     }
 }
 
@@ -121,6 +132,21 @@ impl VerifactuTransport for HttpVerifactuTransport {
                     detail: wire.to_string(),
                 }),
                 Ok(response) => {
+                    // First: a stand-in's answer is never AEAT's, whatever
+                    // its status or body.
+                    if let Some(mark) = self
+                        .stand_in_mark
+                        .as_ref()
+                        .filter(|mark| response.headers().contains_key(*mark))
+                    {
+                        return Err(TransportFailure {
+                            detail: format!(
+                                "a stand-in answered (its {mark} header), where only AEAT may — \
+                                 {} is not AEAT's door",
+                                self.endpoint
+                            ),
+                        });
+                    }
                     let status = response.status();
                     // AEAT's certificate gate: an unaccepted client
                     // certificate answers HTTP 302 to the sede error
