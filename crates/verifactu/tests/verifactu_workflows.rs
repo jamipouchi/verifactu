@@ -98,13 +98,7 @@ fn emitter(modality: Modality, signer: Arc<dyn FiscalSigner>) -> VerifactuEmitte
     .expect("valid identity")
 }
 
-#[tokio::test]
-async fn evento_records_are_always_signed_never_remitted_and_chain_through_huellas() {
-    let (signer, transport) = (
-        Arc::new(FakeSigner::new()),
-        Arc::new(FakeVerifactuTransport::new()),
-    );
-    let emitter = emitter(Modality::Remission, signer.clone()).with_transport(transport.clone());
+fn primer_evento() -> ChainRecord {
     let sif = verifactu::engine::events::EventoSif {
         nif: String::from("B12345678"),
         id: String::new(),
@@ -112,14 +106,24 @@ async fn evento_records_are_always_signed_never_remitted_and_chain_through_huell
         version: String::from("0.1.0"),
         numero_instalacion: String::from("1"),
     };
-    let primer = ChainRecord::seal(
+    ChainRecord::seal(
         ChainKind::Evento {
             event: verifactu::engine::events::evento_restore(&sif, "B12345678"),
             fecha_huso_gen_evento: instante("2025-02-05T08:00:00+01:00"),
         },
         1_738_745_600,
         None,
+    )
+}
+
+#[tokio::test]
+async fn evento_records_are_always_signed_never_remitted_and_chain_through_huellas() {
+    let (signer, transport) = (
+        Arc::new(FakeSigner::new()),
+        Arc::new(FakeVerifactuTransport::new()),
     );
+    let emitter = emitter(Modality::Remission, signer.clone()).with_transport(transport.clone());
+    let primer = primer_evento();
 
     let emission = emitter
         .submit(&[(primer.clone(), EmissionContext::default())])
@@ -258,4 +262,77 @@ fn emission_error_codes_are_stable_and_namespaced() {
         assert_eq!(error.code(), code);
         assert_eq!(error.class(), class);
     }
+}
+
+/// `check` gives `submit`'s verdict on one record without signing or
+/// sending: what a ledger owner runs before committing a sealed record.
+#[tokio::test]
+async fn check_refuses_what_submit_refuses_without_signing_or_sending() {
+    let (signer, transport) = (
+        Arc::new(FakeSigner::new()),
+        Arc::new(FakeVerifactuTransport::new()),
+    );
+    let remission = emitter(Modality::Remission, signer.clone()).with_transport(transport.clone());
+
+    // An F1 names its counterparty (AEAT 1189): refused alike, before
+    // anything is signed or sent.
+    let ChainKind::Alta {
+        issuer,
+        serie,
+        number,
+        fecha_expedicion,
+        cuota_total,
+        importe_total,
+        fecha_huso_gen,
+        ..
+    } = ticket_alta_record().kind
+    else {
+        unreachable!("the ticket is an alta");
+    };
+    let f1 = ChainRecord::seal(
+        ChainKind::Alta {
+            issuer,
+            serie,
+            number,
+            fecha_expedicion,
+            tipo_factura: TipoFactura::F1,
+            cuota_total,
+            importe_total,
+            fecha_huso_gen,
+        },
+        EMISSION_INSTANT,
+        None,
+    );
+    let checked = remission
+        .check(&f1, &ticket_ctx())
+        .expect_err("an F1 without Destinatarios");
+    let submitted = remission
+        .submit(&[(f1.clone(), ticket_ctx())])
+        .await
+        .expect_err("an F1 without Destinatarios");
+    assert_eq!(checked.to_string(), submitted.to_string());
+    assert!(checked.to_string().contains("1189"), "{checked}");
+    assert_eq!(checked.code(), "fiscal.invalid-record");
+    // The business rules bind remission only (Validaciones §4.3.2).
+    emitter(Modality::Conservation, signer.clone())
+        .check(&f1, &ticket_ctx())
+        .expect("conservation admits it");
+
+    remission
+        .check(&ticket_alta_record(), &ticket_ctx())
+        .expect("the ticket is admitted");
+    remission
+        .check(&primer_evento(), &EmissionContext::default())
+        .expect("an evento meets its own gates");
+    let mut tampered = ticket_alta_record();
+    tampered.huella = "0".repeat(64);
+    assert!(remission
+        .check(&tampered, &ticket_ctx())
+        .is_err_and(|error| error.to_string().contains("huella")));
+
+    assert_eq!(
+        (signer.signed_count(), transport.send_count()),
+        (0, 0),
+        "check neither signs nor sends"
+    );
 }

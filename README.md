@@ -81,7 +81,10 @@ read edge it should hand the raw answer body to.
 
 Consumers that keep their own durable chain seal records themselves
 (`engine::ChainRecord::seal`) and submit them in envíos of up to 1000
-through `engine::VerifactuEmitter::submit`; `engine::verify_chain`
+through `engine::VerifactuEmitter::submit`. `VerifactuEmitter::check`
+refuses a sealed record exactly as `submit` would, without signing or
+sending it: run it before committing the record to your chain, where an
+original is immutable. `engine::verify_chain`
 audits a stored chain (every huella recomputes, every record sealed onto
 the one before). `engine::HttpVerifactuTransport` dials the endpoint
 you name; `refusing_stand_ins(mark)` refuses every answer carrying

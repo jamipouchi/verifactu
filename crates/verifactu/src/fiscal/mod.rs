@@ -702,11 +702,7 @@ impl VerifactuEmitter {
             });
         }
         for (record, _) in pairs {
-            if !record.huella_recomputes() {
-                return Err(EmitError::InvalidRecord {
-                    detail: String::from("stored huella does not recompute over the cadena"),
-                });
-            }
+            Self::huella_holds(record)?;
         }
         if let [(record, context)] = pairs {
             if let ChainKind::Evento { .. } = &record.kind {
@@ -769,6 +765,34 @@ impl VerifactuEmitter {
         }
     }
 
+    /// Refuses `record` exactly as [`Self::submit`] would refuse it in an
+    /// envío — every gate of this emitter's modality, AEAT's business
+    /// rules under remission — without signing or sending anything: the
+    /// check a ledger owner runs on a sealed record before committing it
+    /// to its chain, where an original is immutable. The envío's own
+    /// rules (1..1000 records, one requerimiento, eventos alone) stay
+    /// [`Self::submit`]'s.
+    ///
+    /// # Errors
+    /// [`EmitError::InvalidRecord`] naming the field and the law it
+    /// breaks: AEAT's error code or the section of its rules.
+    pub fn check(
+        &self,
+        record: &ChainRecord,
+        context: &EmissionContext<'_>,
+    ) -> Result<(), EmitError> {
+        Self::huella_holds(record)?;
+        if let ChainKind::Evento { .. } = &record.kind {
+            Self::evento_node(record, context)?;
+            return Ok(());
+        }
+        if let Some(requerimiento) = &context.requerimiento {
+            Self::check_referencia(&requerimiento.referencia)?;
+        }
+        self.unsigned_node(record, context)?;
+        Ok(())
+    }
+
     /// The consulta read-back over this emitter's obligado (the tenant
     /// door): every page merged, [`crate::fiscal::consulta`] for the
     /// raw shapes.
@@ -800,12 +824,9 @@ impl VerifactuEmitter {
     /// The one requerimiento the envío answers, if any.
     ///
     /// # Errors
-    /// [`EmitError::InvalidRecord`] when the modality forbids a
-    /// requerimiento (remission remits voluntarily), a reference is not
-    /// 1..18 alphanumeric (AEAT validation 4133, live-confirmed
-    /// 2026-10-05: a hyphen was rejected `env:Client` — an
-    /// application-level rule beyond the XSD), or one envío carries two
-    /// different requerimientos.
+    /// [`EmitError::InvalidRecord`] when a reference is not 1..18
+    /// alphanumeric (AEAT 4133), or one envío carries two different
+    /// requerimientos.
     fn requerimiento_of<'p>(
         pairs: &'p [(ChainRecord, EmissionContext<'_>)],
     ) -> Result<Option<&'p Requerimiento>, EmitError> {
@@ -814,18 +835,7 @@ impl VerifactuEmitter {
             .iter()
             .filter_map(|(_, ctx)| ctx.requerimiento.as_ref())
         {
-            let referencia = &requerimiento.referencia;
-            if referencia.is_empty()
-                || referencia.len() > 18
-                || !referencia.chars().all(|c| c.is_ascii_alphanumeric())
-            {
-                return Err(EmitError::InvalidRecord {
-                    detail: format!(
-                        "RefRequerimiento must be 1..18 ASCII alphanumerics (TextMax18, AEAT \
-                         4133), got {referencia:?}"
-                    ),
-                });
-            }
+            Self::check_referencia(&requerimiento.referencia)?;
             if found.is_some_and(|first| first != requerimiento) {
                 return Err(EmitError::InvalidRecord {
                     detail: String::from(
@@ -839,13 +849,50 @@ impl VerifactuEmitter {
         Ok(found)
     }
 
+    /// AEAT 4133 (live-confirmed 2026-10-05: a hyphen was rejected
+    /// `env:Client` — an application-level rule beyond the XSD).
+    fn check_referencia(referencia: &str) -> Result<(), EmitError> {
+        if referencia.is_empty()
+            || referencia.len() > 18
+            || !referencia.chars().all(|c| c.is_ascii_alphanumeric())
+        {
+            return Err(EmitError::InvalidRecord {
+                detail: format!(
+                    "RefRequerimiento must be 1..18 ASCII alphanumerics (TextMax18, AEAT 4133), \
+                     got {referencia:?}"
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    fn huella_holds(record: &ChainRecord) -> Result<(), EmitError> {
+        if record.huella_recomputes() {
+            Ok(())
+        } else {
+            Err(EmitError::InvalidRecord {
+                detail: String::from("stored huella does not recompute over the cadena"),
+            })
+        }
+    }
+
     fn emit_evento(
         &self,
         record: &ChainRecord,
         context: &EmissionContext<'_>,
     ) -> Result<Emission, EmitError> {
+        let node = Self::evento_node(record, context)?;
+        let signed = self.signer.sign_xades_epes(&node)?;
+        Ok(Emission::kept_local(vec![xml::registro_evento(&signed)]))
+    }
+
+    /// An evento's unsigned node, through every gate an evento meets.
+    fn evento_node(
+        record: &ChainRecord,
+        context: &EmissionContext<'_>,
+    ) -> Result<String, EmitError> {
         let ChainKind::Evento { event, .. } = &record.kind else {
-            unreachable!("submit dispatches only evento records here");
+            unreachable!("only evento records are dispatched here");
         };
         if context.requerimiento.is_some() {
             return Err(EmitError::InvalidRecord {
@@ -863,9 +910,7 @@ impl VerifactuEmitter {
                 ),
             });
         }
-        let node = xml::evento_node(record, context)?;
-        let signed = self.signer.sign_xades_epes(&node)?;
-        Ok(Emission::kept_local(vec![xml::registro_evento(&signed)]))
+        Ok(xml::evento_node(record, context)?)
     }
 
     fn serialize_and_sign(
@@ -874,23 +919,7 @@ impl VerifactuEmitter {
     ) -> Result<Vec<String>, EmitError> {
         let mut signed_records = Vec::with_capacity(pairs.len());
         for (record, context) in pairs {
-            if self.modality == Modality::Remission && context.requerimiento.is_some() {
-                return Err(EmitError::InvalidRecord {
-                    detail: String::from(
-                        "remission modality remits voluntarily — a requerimiento never mixes in",
-                    ),
-                });
-            }
-            if self.modality == Modality::Conservation && context.incidencia {
-                return Err(EmitError::InvalidRecord {
-                    detail: String::from(
-                        "Incidencia belongs to RemisionVoluntaria; conservation remits bajo \
-                         requerimiento only",
-                    ),
-                });
-            }
-            let unsigned =
-                xml::record_node(record, context, &self.obligado, &self.sif, self.modality)?;
+            let unsigned = self.unsigned_node(record, context)?;
             let signed = if Self::must_sign(self.modality, &record.kind) {
                 self.signer.sign_xades_epes(&unsigned)?
             } else {
@@ -899,6 +928,37 @@ impl VerifactuEmitter {
             signed_records.push(signed);
         }
         Ok(signed_records)
+    }
+
+    /// An alta's or anulación's unsigned node, through every gate of this
+    /// emitter's modality.
+    fn unsigned_node(
+        &self,
+        record: &ChainRecord,
+        context: &EmissionContext<'_>,
+    ) -> Result<String, EmitError> {
+        if self.modality == Modality::Remission && context.requerimiento.is_some() {
+            return Err(EmitError::InvalidRecord {
+                detail: String::from(
+                    "remission modality remits voluntarily — a requerimiento never mixes in",
+                ),
+            });
+        }
+        if self.modality == Modality::Conservation && context.incidencia {
+            return Err(EmitError::InvalidRecord {
+                detail: String::from(
+                    "Incidencia belongs to RemisionVoluntaria; conservation remits bajo \
+                     requerimiento only",
+                ),
+            });
+        }
+        Ok(xml::record_node(
+            record,
+            context,
+            &self.obligado,
+            &self.sif,
+            self.modality,
+        )?)
     }
 }
 
