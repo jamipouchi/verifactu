@@ -228,6 +228,12 @@ fn check_detalle(
         || d.cuota_recargo_equivalencia.is_some();
     let field = "DetalleDesglose";
 
+    if d.tipo_recargo_equivalencia.is_some() != d.cuota_recargo_equivalencia.is_some() {
+        return Err(refuse(
+            field,
+            "TipoRecargoEquivalencia and CuotaRecargoEquivalencia go together (AEAT 1284)",
+        ));
+    }
     // §15.1, §15.3 — the rates an IVA S1 line admits.
     if iva && d.calificacion == Some(Calificacion::SujetaNoExenta) {
         if let Some(rate) = d.tipo_impositivo.map(Money::as_cents) {
@@ -446,6 +452,10 @@ fn check_clave(
         }
         Some(Clave::C11) if iva => d.tipo_impositivo.is_none_or(|r| r.as_cents() == 2100),
         Some(Clave::C20) if igic => calificacion == Some(Calificacion::NoSujetaLocalizacion),
+        // 18 (recargo de equivalencia) binds nothing: Validaciones v1.0.7
+        // lifted the rule keeping recargo under 18 and v1.1.2 deleted its
+        // §15.6.9 (1279 and 1280 are gone from the error list), so AEAT
+        // admits recargo under 01 and 18 without it.
         _ => true,
     };
     if ok {
@@ -693,6 +703,31 @@ mod tests {
             ),
             "§15.3",
         );
+        // The helper declares the recargo's regime; AEAT binds neither
+        // way, so 01 with recargo and 18 without it are admitted too.
+        let recargo = lines::sujeta_iva_recargo(2100, 520, 1000);
+        assert_eq!(recargo.clave_regimen, Some(Clave::C18));
+        let general = DetalleDesglose {
+            clave_regimen: Some(Clave::C01),
+            ..recargo.clone()
+        };
+        assert_eq!(verdict(F1, DAY, &[general], |_| {}), Ok(()));
+        let bare_18 = DetalleDesglose {
+            clave_regimen: Some(Clave::C18),
+            ..iva_super()
+        };
+        assert_eq!(verdict(F1, DAY, &[bare_18], |_| {}), Ok(()));
+        // AEAT 1284: the recargo's rate and cuota go together.
+        let rate_only = DetalleDesglose {
+            cuota_recargo_equivalencia: None,
+            ..recargo.clone()
+        };
+        refused(verdict(F1, DAY, &[rate_only], |_| {}), "1284");
+        let cuota_only = DetalleDesglose {
+            tipo_recargo_equivalencia: None,
+            ..recargo
+        };
+        refused(verdict(F1, DAY, &[cuota_only], |_| {}), "1284");
     }
 
     #[test]

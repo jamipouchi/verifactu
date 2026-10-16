@@ -67,11 +67,14 @@ pub mod lines {
         }
     }
 
-    /// An IVA line under recargo de equivalencia: `rate_cents` (2100 =
-    /// 21,00 %) and `recargo_rate_cents` (520 = 5,20 %) over `base_cents`,
-    /// both cuotas computed from their pair. AEAT admits only the
-    /// recargo each rate pairs with (21 → 5,2 or 1,75; 10 → 1,4; 4 → 0,5;
-    /// Validaciones §15.3).
+    /// An IVA line under recargo de equivalencia, declared under
+    /// `ClaveRegimen` 18, the regime L8A names for it (live-confirmed
+    /// 2026-10-05: pruebas answered `Correcto` an S1 line at 21 % with
+    /// recargo 5,2 under 18): `rate_cents` (2100 = 21,00 %) and
+    /// `recargo_rate_cents` (520 = 5,20 %) over `base_cents`, both cuotas
+    /// computed from their pair. AEAT admits only the recargo each rate
+    /// pairs with (21 → 5,2 or 1,75; 10 → 1,4; 4 → 0,5; Validaciones
+    /// §15.3).
     #[must_use]
     pub fn sujeta_iva_recargo(
         rate_cents: i64,
@@ -79,6 +82,7 @@ pub mod lines {
         base_cents: i64,
     ) -> DetalleDesglose {
         DetalleDesglose {
+            clave_regimen: Some(crate::fiscal::ClaveRegimen::C18),
             tipo_recargo_equivalencia: Some(Money::from_cents(recargo_rate_cents)),
             cuota_recargo_equivalencia: Some(Money::from_cents(cuota_cents(
                 recargo_rate_cents,
