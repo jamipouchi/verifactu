@@ -455,7 +455,9 @@ fn check_clave(
         // 18 (recargo de equivalencia) binds nothing: Validaciones v1.0.7
         // lifted the rule keeping recargo under 18 and v1.1.2 deleted its
         // §15.6.9 (1279 and 1280 are gone from the error list), so AEAT
-        // admits recargo under 01 and 18 without it.
+        // admits recargo under 01 and 18 without it (live-confirmed
+        // 2026-10-16: pruebas answered Correcto an F1 line at 21 % with
+        // recargo 5,2 under 01).
         _ => true,
     };
     if ok {
