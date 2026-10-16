@@ -84,12 +84,13 @@ Consumers that keep their own durable chain seal records themselves
 through `engine::VerifactuEmitter::submit`. `VerifactuEmitter::check`
 refuses a sealed record exactly as `submit` would, without signing or
 sending it: run it before committing the record to your chain, where an
-original is immutable. `engine::verify_chain`
-audits a stored chain (every huella recomputes, every record sealed onto
-the one before). `engine::HttpVerifactuTransport` dials the endpoint
-you name; `refusing_stand_ins(mark)` refuses every answer carrying
-your stand-ins' mark header, so a build that must reach AEAT never
-reads a fake's verdict as AEAT's. One signing port serves both faces:
+original is immutable. `engine::verify_chain` audits a stored chain
+(every huella recomputes, every record sealed onto the one before),
+whole or as a tail after a known predecessor.
+`engine::HttpVerifactuTransport` dials the endpoint you name;
+`refusing_stand_ins(mark)` refuses every answer carrying your
+stand-ins' mark header, so a build that must reach AEAT never reads a
+fake's verdict as AEAT's. One signing port serves both faces:
 `FiscalSigner`, implemented by `engine::XadesSigner`, your own KMS/HSM
 signer, or — in tests, feature `fakes` — `engine::FakeSigner`.
 

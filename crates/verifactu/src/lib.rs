@@ -164,8 +164,8 @@ pub mod engine {
     pub use crate::clock::FakeClock;
     pub use crate::clock::{Clock, SystemClock, Timestamp};
     pub use crate::domain::chain::{
-        huella, verify_chain, ChainBreak, ChainKind, ChainRecord, EventData, Predecessor, PrevRef,
-        SealError,
+        huella, huella_alta_montos, verify_chain, ChainBreak, ChainKind, ChainRecord, EventData,
+        Predecessor, PrevRef, SealError,
     };
     pub use crate::emit_draft;
     pub use crate::fiscal::consulta;

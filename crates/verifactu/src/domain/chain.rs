@@ -32,11 +32,13 @@ fn cadena_of(pairs: &[(&str, &str)]) -> String {
     out
 }
 
-/// The `RegistroAlta` huella (HS §3.a) over TEXT amounts: the consulta
-/// read-back recomputes AEAT's STORED huella from the decimals it
-/// echoes verbatim — HS §3 makes 1- and 2-decimal renderings equally
-/// valid, so re-rendering through [`render_amount`] would
-/// false-negative a legally-echoed `41.4`.
+/// The `RegistroAlta` huella (HS §3.a) over its eight fields as TEXT,
+/// `huella_previa` `None` on a `PrimerRegistro`: an alta's huella from
+/// the strings a store or AEAT holds, without a [`ChainRecord`]. The
+/// amounts go in as written — HS §3 makes 1- and 2-decimal renderings
+/// equally valid, so re-rendering AEAT's verbatim echo (`41.4`) would
+/// false-negative it; the consulta read-back recomputes AEAT's stored
+/// huella this way.
 #[allow(clippy::too_many_arguments)] // the HS §3.a input is eight named fields, by law
 #[must_use]
 pub fn huella_alta_montos(
@@ -487,21 +489,27 @@ pub enum ChainBreak {
     #[error("record {index}: the stored huella does not recompute")]
     Huella { index: usize },
     /// The record is not sealed onto the one before it (or, first in the
-    /// slice, it states a predecessor).
+    /// slice, onto the predecessor the audit starts from).
     #[error("record {index}: not sealed onto the record before it")]
     Link { index: usize },
 }
 
 /// Audits one chain family — an installation's invoice records, or its
 /// event records — in append order: every huella recomputes, the first
-/// record is a chain's first (`PrimerRegistro`/`PrimerEvento`), and
-/// every later one is sealed onto exactly the record before it. An
-/// empty slice verifies.
+/// record is sealed onto `after`, and every later one onto exactly the
+/// record before it. `after` is `None` for a whole chain, whose first
+/// record is a `PrimerRegistro`/`PrimerEvento`, or a stored record's
+/// cursor ([`ChainRecord::predecessor`]) to audit the records after it
+/// on their own. An empty slice verifies.
 ///
 /// # Errors
-/// [`ChainBreak`] at the first record that fails.
-pub fn verify_chain(records: &[ChainRecord]) -> Result<(), ChainBreak> {
-    let mut previous: Option<Predecessor> = None;
+/// [`ChainBreak`] at the first record that fails, by its position in
+/// `records`.
+pub fn verify_chain(
+    after: Option<&Predecessor>,
+    records: &[ChainRecord],
+) -> Result<(), ChainBreak> {
+    let mut previous = after.cloned();
     for (index, record) in records.iter().enumerate() {
         if !record.huella_recomputes() {
             return Err(ChainBreak::Huella { index });
@@ -647,7 +655,8 @@ mod tests {
 
     /// The audit catches each way a stored chain can go wrong: a field
     /// edited after sealing, a record out of order, a first record that
-    /// claims a predecessor, the event slot stuffed on an invoice.
+    /// claims a predecessor, the event slot stuffed on an invoice — and
+    /// a stored tail verifies from its known predecessor alone.
     #[test]
     fn verify_chain_pins_the_first_break() {
         let alta = |number: u64, prev: Option<&ChainRecord>| {
@@ -670,28 +679,51 @@ mod tests {
         let second = alta(2, Some(&first));
         let third = alta(3, Some(&second));
         let chain = [first.clone(), second.clone(), third.clone()];
-        assert_eq!(verify_chain(&chain), Ok(()));
-        assert_eq!(verify_chain(&[]), Ok(()));
+        assert_eq!(verify_chain(None, &chain), Ok(()));
+        assert_eq!(verify_chain(None, &[]), Ok(()));
+        assert_eq!(
+            verify_chain(Some(&first.predecessor()), &chain[1..]),
+            Ok(())
+        );
+        assert_eq!(verify_chain(Some(&third.predecessor()), &[]), Ok(()));
+        assert_eq!(
+            verify_chain(None, &chain[1..]),
+            Err(ChainBreak::Link { index: 0 }),
+            "a tail is not a whole chain"
+        );
+        assert_eq!(
+            verify_chain(Some(&second.predecessor()), &chain[1..]),
+            Err(ChainBreak::Link { index: 0 }),
+            "nor sealed onto any other record"
+        );
+        assert_eq!(
+            verify_chain(Some(&first.predecessor()), &chain),
+            Err(ChainBreak::Link { index: 0 }),
+            "a primer registro has no predecessor"
+        );
 
         let mut edited = chain.clone();
         if let ChainKind::Alta { importe_total, .. } = &mut edited[1].kind {
             *importe_total = Money::from_cents(1211);
         }
-        assert_eq!(verify_chain(&edited), Err(ChainBreak::Huella { index: 1 }));
+        assert_eq!(
+            verify_chain(None, &edited),
+            Err(ChainBreak::Huella { index: 1 })
+        );
 
         assert_eq!(
-            verify_chain(&[first.clone(), third.clone()]),
+            verify_chain(None, &[first.clone(), third.clone()]),
             Err(ChainBreak::Link { index: 1 })
         );
         assert_eq!(
-            verify_chain(&[second.clone(), third]),
+            verify_chain(None, &[second.clone(), third]),
             Err(ChainBreak::Link { index: 0 })
         );
 
         let mut stuffed = first;
         stuffed.prev_evento_huella = Some(second.huella);
         assert_eq!(
-            verify_chain(&[stuffed]),
+            verify_chain(None, &[stuffed]),
             Err(ChainBreak::Link { index: 0 }),
             "the event slot is not hashed on an invoice — only the link check sees it"
         );
