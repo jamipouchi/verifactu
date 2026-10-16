@@ -7,11 +7,12 @@ use std::sync::Arc;
 use verifactu::engine::ChainRecord;
 use verifactu::engine::FakeVerifactuTransport;
 use verifactu::engine::{EmissionContext, SiNo};
-use verifactu::engine::{FakeSigner, SistemaInformaticoConfig, VerifactuEmitter};
+use verifactu::engine::{FakeClock, FakeSigner, SistemaInformaticoConfig, VerifactuEmitter};
 use verifactu::ErrorClass;
 use verifactu::FiscalSigner;
 use verifactu::Money;
 use verifactu::Series;
+use verifactu::Timestamp;
 use verifactu::{ChainKind, FechaExpedicion, FechaHuso, TipoFactura};
 use verifactu::{DetalleDesglose, EmitError, Modality, Obligado};
 
@@ -87,7 +88,14 @@ fn ticket_ctx() -> EmissionContext<'static> {
 }
 
 fn emitter(modality: Modality, signer: Arc<dyn FiscalSigner>) -> VerifactuEmitter {
-    VerifactuEmitter::new(modality, obligado(), sif(), signer).expect("valid identity")
+    VerifactuEmitter::new(
+        modality,
+        obligado(),
+        sif(),
+        signer,
+        Arc::new(FakeClock::new(Timestamp(EMISSION_INSTANT))),
+    )
+    .expect("valid identity")
 }
 
 #[tokio::test]

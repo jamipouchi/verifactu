@@ -50,8 +50,8 @@
 //!   [`SendFuture`], so a runtime fetch (a JS `Promise`, structurally
 //!   `!Send`) implements [`VerifactuTransport`] DIRECTLY — no
 //!   spawn/oneshot bridge.
-//! - wasm has no `SystemTime`: inject your runtime's date API through
-//!   [`VerifactuBuilder::clock`] and the flat `emit_invoice` loop runs
+//! - wasm has no `SystemTime`: give [`Verifactu::builder`] a clock
+//!   over your runtime's date API and the flat `emit_invoice` loop runs
 //!   unmodified. Egress stays your transport: on Workers, an uploaded
 //!   mTLS-certificate binding IS a `Fetcher` presenting the client
 //!   cert at the TLS handshake — the AEAT door (`wrangler
@@ -124,6 +124,7 @@ pub use crate::draft::{cancel_draft, emit_draft, lines, EmittedInvoice, InvoiceD
 // ledger-owner's surface.
 #[cfg(feature = "http")]
 pub use crate::aeat::p12::ClientIdentity;
+pub use crate::clock::{Clock, SystemClock, Timestamp};
 pub use crate::domain::chain::{ChainKind, PrevRef};
 pub use crate::domain::chain::{FechaExpedicion, FechaHuso, Predecessor, TipoFactura};
 pub use crate::domain::error::ErrorClass;

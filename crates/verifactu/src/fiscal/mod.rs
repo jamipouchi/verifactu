@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use strum::IntoEnumIterator;
 
-use crate::clock::{Clock, SystemClock, Timestamp};
+use crate::clock::{Clock, Timestamp};
 use crate::domain::chain::{ChainKind, ChainRecord, FechaExpedicion};
 use crate::domain::error::ErrorClass;
 use crate::domain::money::Money;
@@ -604,6 +604,9 @@ impl VerifactuEmitter {
         &self.obligado
     }
 
+    /// `clock` is the emission instant source — always the caller's
+    /// (see [`crate::Verifactu::builder`]).
+    ///
     /// # Errors
     /// [`EmitError::InvalidRecord`] when the obligado/SIF identity
     /// violates its SI.xsd simple types.
@@ -612,6 +615,7 @@ impl VerifactuEmitter {
         obligado: Obligado,
         sif: SistemaInformaticoConfig,
         signer: Arc<dyn FiscalSigner>,
+        clock: Arc<dyn Clock>,
     ) -> Result<Self, EmitError> {
         xml::check_nif("ObligadoEmision/NIF", &obligado.nif)?;
         xml::check_text("ObligadoEmision/NombreRazon", &obligado.nombre_razon, 120)?;
@@ -630,7 +634,7 @@ impl VerifactuEmitter {
             representante: None,
             sif,
             signer,
-            clock: Arc::new(SystemClock),
+            clock,
             transport: None,
         })
     }
@@ -638,15 +642,6 @@ impl VerifactuEmitter {
     #[must_use]
     pub fn with_transport(mut self, transport: Arc<dyn VerifactuTransport>) -> Self {
         self.transport = Some(transport);
-        self
-    }
-
-    /// The clock emissions read (default: the system wall clock) —
-    /// [`crate::VerifactuBuilder::clock`] threads through here; direct
-    /// engine consumers inject their own.
-    #[must_use]
-    pub fn with_clock(mut self, clock: Arc<dyn Clock>) -> Self {
-        self.clock = clock;
         self
     }
 
@@ -966,11 +961,18 @@ mod tests {
 
     use super::tests_support::{iva_super, obligado, primer_alta_record, sif, EMISSION_INSTANT};
     use super::{DetalleDesglose, EmissionContext, Modality, Obligado, VerifactuEmitter};
+    use crate::clock::{FakeClock, Timestamp};
     use crate::signer::FakeSigner;
 
     fn emitter(modality: Modality) -> VerifactuEmitter {
-        VerifactuEmitter::new(modality, obligado(), sif(), Arc::new(FakeSigner::new()))
-            .expect("test config is valid")
+        VerifactuEmitter::new(
+            modality,
+            obligado(),
+            sif(),
+            Arc::new(FakeSigner::new()),
+            Arc::new(FakeClock::new(Timestamp(EMISSION_INSTANT))),
+        )
+        .expect("test config is valid")
     }
 
     fn alta_ctx() -> EmissionContext<'static> {

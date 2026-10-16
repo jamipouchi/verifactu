@@ -5,6 +5,14 @@ use crate::{
     VerifactuError,
 };
 
+/// Every emission here reads this fixed instant (AEAT's example,
+/// Madrid `2025-02-03T14:30:00+01:00`) — no test reads the wall clock.
+fn clock() -> std::sync::Arc<dyn crate::Clock> {
+    std::sync::Arc::new(crate::engine::FakeClock::new(crate::Timestamp(
+        1_738_589_400,
+    )))
+}
+
 /// The software's producer — never one of the tenants below.
 fn productor() -> Obligado {
     Obligado {
@@ -25,7 +33,7 @@ fn sif() -> SifConfig {
 }
 
 fn root() -> Verifactu {
-    Verifactu::builder()
+    Verifactu::builder(clock())
         .sif(sif())
         .build()
         .expect("pruebas root builds with no gate")
@@ -37,7 +45,7 @@ fn root() -> Verifactu {
 #[test]
 fn the_production_gate_fails_closed_without_the_deployment_key() {
     std::env::remove_var("VERIFACTU_ALLOW_PRODUCTION");
-    let error = Verifactu::builder()
+    let error = Verifactu::builder(clock())
         .environment(Environment::production(
             ProductionOptIn::these_emissions_are_legally_binding(),
         ))
@@ -50,7 +58,7 @@ fn the_production_gate_fails_closed_without_the_deployment_key() {
     );
 
     std::env::set_var("VERIFACTU_ALLOW_PRODUCTION", "1");
-    let root = Verifactu::builder()
+    let root = Verifactu::builder(clock())
         .environment(Environment::production(
             ProductionOptIn::these_emissions_are_legally_binding(),
         ))
@@ -178,6 +186,7 @@ async fn the_cancel_door_annuls_a_stored_cursor_and_chains() {
             uso_posible: crate::UsoPosible::SoloVerifactu,
         },
         std::sync::Arc::new(FakeSigner::new()),
+        clock(),
     )
     .expect("valid identity")
     .with_transport(transport);
@@ -581,9 +590,8 @@ async fn the_draft_gates_and_the_sealed_echo() {
         tiempo_espera_envio: 60,
     });
     let clock = std::sync::Arc::new(FakeClock::new(Timestamp(1_738_589_400)));
-    let tenant = Verifactu::builder()
+    let tenant = Verifactu::builder(clock)
         .sif(sif())
-        .clock(clock)
         .build()
         .expect("pruebas root builds with no gate")
         .tenant(CertificateSource::Custom {
@@ -747,7 +755,7 @@ async fn a_conservation_tenant_needs_a_sif_that_also_runs_no_verifactu() {
     use crate::engine::{FakeSigner, FakeVerifactuTransport};
     use crate::{lines, CertificateSource, InvoiceDraft, Modality, Series};
     let connect = |sif: SifConfig| {
-        Verifactu::builder()
+        Verifactu::builder(clock())
             .sif(sif)
             .build()
             .expect("pruebas root")

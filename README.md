@@ -98,8 +98,8 @@ signer, or — in tests, feature `fakes` — `engine::FakeSigner`.
 - the `edge` feature drops the `+ Send` bound from `SendFuture`, so a
   runtime fetch (a JS `Promise`, structurally `!Send`) implements
   `VerifactuTransport` directly.
-- wasm has no `SystemTime`: inject your runtime's date API through
-  `VerifactuBuilder::clock` and the flat `emit_invoice` loop runs
+- wasm has no `SystemTime`: give `Verifactu::builder` a clock over
+  your runtime's date API and the flat `emit_invoice` loop runs
   unmodified.
 
 ## Building

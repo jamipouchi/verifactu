@@ -67,10 +67,15 @@ impl<'a, 'r> TenantConnecting<'a, 'r> {
         let legs = CertLegs::of(&self.root.clock, self.cert)?;
         let transport = self.root.transport_of(legs.wire, self.modality)?;
         let sif = self.root.sif.for_installation(&self.installation);
-        let emitter = VerifactuEmitter::new(self.modality, obligado, sif, legs.signer)
-            .map_err(|error| VerifactuError::Identity(error.to_string()))?
-            .with_clock(Arc::clone(&self.root.clock))
-            .with_transport(transport);
+        let emitter = VerifactuEmitter::new(
+            self.modality,
+            obligado,
+            sif,
+            legs.signer,
+            Arc::clone(&self.root.clock),
+        )
+        .map_err(|error| VerifactuError::Identity(error.to_string()))?
+        .with_transport(transport);
         Ok(TenantVerifactu { emitter })
     }
 }
@@ -237,8 +242,8 @@ impl VendorVerifactu {
             tenant.clone(),
             self.sif.for_installation(installation),
             Arc::clone(&self.signer),
+            Arc::clone(&self.clock),
         )?
-        .with_clock(Arc::clone(&self.clock))
         .with_representante(self.representante.clone())?
         .with_transport(Arc::clone(&self.transport));
         let emitter = Arc::new(emitter);

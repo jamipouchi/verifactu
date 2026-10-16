@@ -9,7 +9,7 @@ use std::time::Duration;
 use crate::aeat::p12::ClientIdentity;
 #[cfg(feature = "http")]
 use crate::aeat::HttpVerifactuTransport;
-use crate::clock::{Clock, SystemClock};
+use crate::clock::Clock;
 use crate::custody::{TenantConnecting, VendorConnecting};
 use crate::fiscal::transport::VerifactuTransport;
 use crate::fiscal::{Modality, Obligado, SistemaInformaticoConfig, UsoPosible};
@@ -156,30 +156,21 @@ pub struct VerifactuBuilder {
     sif: Option<SifConfig>,
     #[cfg(feature = "http")]
     timeout: Duration,
-    clock: Option<Arc<dyn Clock>>,
+    clock: Arc<dyn Clock>,
 }
 
 impl std::fmt::Debug for VerifactuBuilder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("VerifactuBuilder")
             .field("environment", &self.environment)
-            .field(
-                "clock",
-                &self.clock.as_ref().map_or("<system>", |_| "<injected>"),
-            )
             .finish_non_exhaustive()
     }
 }
 
-impl Default for VerifactuBuilder {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl VerifactuBuilder {
+    /// See [`Verifactu::builder`].
     #[must_use]
-    pub fn new() -> Self {
+    pub fn new(clock: Arc<dyn Clock>) -> Self {
         Self {
             environment: Environment::Pruebas,
             #[cfg(feature = "http")]
@@ -187,7 +178,7 @@ impl VerifactuBuilder {
             sif: None,
             #[cfg(feature = "http")]
             timeout: DEFAULT_TIMEOUT,
-            clock: None,
+            clock,
         }
     }
 
@@ -217,16 +208,6 @@ impl VerifactuBuilder {
         self
     }
 
-    /// The clock every emission reads (default: the system wall
-    /// clock). Tests inject `engine::FakeClock` (feature `fakes`) for byte-identical
-    /// emissions; wasm builds (no `SystemTime`) inject a clock over
-    /// their runtime's date API.
-    #[must_use]
-    pub fn clock(mut self, clock: Arc<dyn Clock>) -> Self {
-        self.clock = Some(clock);
-        self
-    }
-
     /// The production gate's one enforcement point.
     ///
     /// # Errors
@@ -250,7 +231,7 @@ impl VerifactuBuilder {
             })?,
             #[cfg(feature = "http")]
             timeout: self.timeout,
-            clock: self.clock.unwrap_or_else(|| Arc::new(SystemClock)),
+            clock: self.clock,
         })
     }
 }
@@ -346,9 +327,17 @@ impl CertLegs {
 }
 
 impl Verifactu {
+    /// `clock` is what every emission reads: the records' instants and
+    /// the `XAdES` signing time. There is no default — a fiscal
+    /// timestamp's source is the product's decision: [`SystemClock`]
+    /// for the host's wall clock, `engine::FakeClock` (feature `fakes`)
+    /// for byte-identical emissions in tests, a clock over the
+    /// runtime's date API on wasm (no `SystemTime`).
+    ///
+    /// [`SystemClock`]: crate::SystemClock
     #[must_use]
-    pub fn builder() -> VerifactuBuilder {
-        VerifactuBuilder::new()
+    pub fn builder(clock: Arc<dyn Clock>) -> VerifactuBuilder {
+        VerifactuBuilder::new(clock)
     }
 
     /// Where emissions go — products assert/display this; the gate

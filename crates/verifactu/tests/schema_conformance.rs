@@ -115,6 +115,13 @@ fn block_on<F: std::future::Future>(future: F) -> F::Output {
         .block_on(future)
 }
 
+/// Submission and consulta read no clock; the emitter still takes one.
+fn fixed_clock() -> Arc<dyn verifactu::Clock> {
+    Arc::new(verifactu::engine::FakeClock::new(verifactu::Timestamp(
+        1_738_589_400,
+    )))
+}
+
 // ---- the input space ---------------------------------------------------
 
 /// One field in about this many is generated off-contract: rare per
@@ -599,6 +606,7 @@ proptest! {
             obligado.clone(),
             sif(&obligado, version),
             Arc::new(FakeSigner::new()),
+            fixed_clock(),
         ) else {
             return Ok(());
         };
@@ -653,6 +661,7 @@ proptest! {
             obligado.clone(),
             sif(&obligado, String::from("1.0")),
             Arc::new(FakeSigner::new()),
+            fixed_clock(),
         ) else {
             return Ok(());
         };
