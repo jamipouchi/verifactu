@@ -8,7 +8,9 @@ use super::{
     parse_soap_answer, SendFuture, TransportFailure, TransportOutcome, VerifactuTransport,
 };
 use crate::fiscal::consulta::{consulta_response_document, ConsultaSpec, Mes, ResultadoConsulta};
-use crate::fiscal::response::{EstadoDuplicado, EstadoEnvio, EstadoRegistro, TipoOperacion};
+use crate::fiscal::response::{
+    DatosPresentacion, EstadoDuplicado, EstadoEnvio, EstadoRegistro, TipoOperacion,
+};
 use crate::fiscal::xml::{parse_tree, tag, Tree, NS_SOAP_ENV, NS_SUMINISTRO, P_ENV};
 
 const NS_RESPUESTA: &str = "https://www2.agenciatributaria.gob.es/static_files/common/internet/dep/aplicaciones/es/aeat/tike/cont/ws/RespuestaSuministro.xsd";
@@ -87,7 +89,9 @@ pub struct RespuestaSpec<'a> {
     pub obligado_nombre: &'a str,
     pub obligado_nif: &'a str,
     pub csv: Option<&'a str>,
-    pub tiempo_espera_envio: u32,
+    pub datos_presentacion: Option<DatosPresentacion>,
+    /// `None` renders the element empty, as AEAT may.
+    pub tiempo_espera_envio: Option<u32>,
     pub estado_envio: EstadoEnvio,
     pub lineas: Vec<LineaSpec>,
 }
@@ -108,6 +112,16 @@ pub fn respuesta_document(spec: &RespuestaSpec<'_>) -> String {
     if let Some(csv) = spec.csv {
         tag(&mut out, "sfR:CSV", csv);
     }
+    if let Some(datos) = &spec.datos_presentacion {
+        out.push_str("<sfR:DatosPresentacion>");
+        tag(&mut out, "sum1:NIFPresentador", &datos.nif_presentador);
+        tag(
+            &mut out,
+            "sum1:TimestampPresentacion",
+            &datos.timestamp_presentacion,
+        );
+        out.push_str("</sfR:DatosPresentacion>");
+    }
     out.push_str("<sfR:Cabecera>");
     out.push_str("<sum1:ObligadoEmision>");
     tag(&mut out, "sum1:NombreRazon", spec.obligado_nombre);
@@ -117,7 +131,9 @@ pub fn respuesta_document(spec: &RespuestaSpec<'_>) -> String {
     tag(
         &mut out,
         "sfR:TiempoEsperaEnvio",
-        &spec.tiempo_espera_envio.to_string(),
+        &spec
+            .tiempo_espera_envio
+            .map_or_else(String::new, |seconds| seconds.to_string()),
     );
     tag(&mut out, "sfR:EstadoEnvio", spec.estado_envio.as_str());
     for linea in &spec.lineas {
@@ -321,7 +337,9 @@ impl FakeVerifactuTransport {
     /// The respuesta echoing every record `soap_envelope` carried: one
     /// line per record, the script's lines first and `Correcto` padding
     /// the rest — or, for a wholesale rejection (`lineas: None`), no
-    /// lines at all.
+    /// lines at all. A scripted CSV comes with AEAT's receipt (both are
+    /// answered only when the envío is not rejected): the obligado
+    /// presents, the instant its last record was generated.
     fn respuesta_for(
         soap_envelope: &str,
         csv: Option<&str>,
@@ -350,11 +368,18 @@ impl FakeVerifactuTransport {
                 .map(|(record, scripted)| Self::line_for(scripted, record))
                 .collect()
         });
+        let datos_presentacion = csv.map(|_| DatosPresentacion {
+            nif_presentador: request.obligado_nif.clone(),
+            timestamp_presentacion: last_generated(soap_envelope).expect(
+                "every record the fake was sent carries its generation instant (bug if not)",
+            ),
+        });
         Self::read_back(&respuesta_document(&RespuestaSpec {
             obligado_nombre: &request.obligado_nombre,
             obligado_nif: &request.obligado_nif,
             csv,
-            tiempo_espera_envio,
+            datos_presentacion,
+            tiempo_espera_envio: Some(tiempo_espera_envio),
             estado_envio,
             lineas,
         }))
@@ -494,6 +519,21 @@ pub struct SentRequest {
     pub obligado_nombre: String,
     pub obligado_nif: String,
     pub records: Vec<SentRecord>,
+}
+
+/// The `FechaHoraHusoGenRegistro` of the last record a submission
+/// envelope carried.
+fn last_generated(envelope: &str) -> Option<String> {
+    parse_tree(envelope)
+        .ok()?
+        .child("Body")?
+        .child("RegFactuSistemaFacturacion")?
+        .children
+        .iter()
+        .filter(|node| node.local == "RegistroFactura")
+        .flat_map(|registro_factura| &registro_factura.children)
+        .filter_map(|record| record.child_text("FechaHoraHusoGenRegistro"))
+        .next_back()
 }
 
 /// # Errors

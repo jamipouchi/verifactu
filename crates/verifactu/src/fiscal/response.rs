@@ -105,14 +105,29 @@ pub struct RespuestaLinea {
     pub registro_duplicado: Option<RegistroDuplicado>,
 }
 
+/// `DatosPresentacionType`: who presented the envío and when AEAT took
+/// it — AEAT's receipt, beside the CSV.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct DatosPresentacion {
+    pub nif_presentador: String,
+    /// `TimestampPresentacion` (`xs:dateTime`) as AEAT wrote it, e.g.
+    /// `2026-10-05T22:49:41+02:00` (live, 2026-10-05).
+    pub timestamp_presentacion: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RespuestaSuministro {
     /// Present only when the envío was not rejected — not re-fetchable
     /// later.
     pub csv: Option<String>,
+    /// Present only when the envío was not rejected (RS.xsd).
+    pub datos_presentacion: Option<DatosPresentacion>,
     /// AEAT's mandated wait (seconds) before the next envío — distinct
-    /// from any retry backoff of the caller's own.
-    pub tiempo_espera_envio: u64,
+    /// from any retry backoff of the caller's own. `None` when AEAT sent
+    /// the element empty: no new pacing, so the wait the caller keeps
+    /// carries (60 s initially).
+    pub tiempo_espera_envio: Option<u64>,
     pub estado_envio: EstadoEnvio,
     pub lineas: Vec<RespuestaLinea>,
 }
@@ -177,15 +192,29 @@ pub fn parse_respuesta(xml: &str) -> Result<RespuestaSuministro, String> {
 /// [`parse_respuesta`]'s tree half, shared with the envelope read edge.
 pub(crate) fn respuesta_of_tree(root: &Tree) -> Result<RespuestaSuministro, String> {
     let csv = root.child_text("CSV").filter(|csv| !csv.is_empty());
-    // `TiempoEsperaEnvio` may arrive EMPTY (`<TiempoEsperaEnvio/>`) — a
-    // legal wire shape meaning "no new pacing from AEAT": the documented
-    // initial 60s carries.
+    let datos_presentacion = root
+        .child("DatosPresentacion")
+        .map(|datos| {
+            Ok::<_, String>(DatosPresentacion {
+                nif_presentador: datos
+                    .child_text("NIFPresentador")
+                    .ok_or("DatosPresentacion without NIFPresentador")?,
+                timestamp_presentacion: datos
+                    .child_text("TimestampPresentacion")
+                    .ok_or("DatosPresentacion without TimestampPresentacion")?,
+            })
+        })
+        .transpose()?;
+    // `TiempoEsperaEnvio` may arrive EMPTY (`<TiempoEsperaEnvio/>`, the
+    // `\d{0,4}` of `Tipo6Type`): AEAT sets no new pacing — never read as
+    // a number it did not send.
     let tiempo_espera_envio = match root.child_text("TiempoEsperaEnvio") {
         None => return Err(String::from("no TiempoEsperaEnvio")),
-        Some(text) if text.is_empty() => 60,
-        Some(text) => text
-            .parse::<u64>()
-            .map_err(|_| String::from("TiempoEsperaEnvio is not numeric"))?,
+        Some(text) if text.is_empty() => None,
+        Some(text) => Some(
+            text.parse::<u64>()
+                .map_err(|_| String::from("TiempoEsperaEnvio is not numeric"))?,
+        ),
     };
     let estado_envio = vocabulary(
         "EstadoEnvio",
@@ -252,6 +281,7 @@ pub(crate) fn respuesta_of_tree(root: &Tree) -> Result<RespuestaSuministro, Stri
     }
     Ok(RespuestaSuministro {
         csv,
+        datos_presentacion,
         tiempo_espera_envio,
         estado_envio,
         lineas,
@@ -435,13 +465,45 @@ mod tests {
         assert!(note.contains("ANULADO"));
     }
 
+    /// AEAT's receipt reads whole, and an empty `TiempoEsperaEnvio` is
+    /// no pacing — never a number AEAT did not send.
+    #[test]
+    fn the_answer_keeps_aeats_receipt_and_an_empty_wait_is_no_wait() {
+        use crate::fiscal::transport::{respuesta_document, RespuestaSpec};
+        let document = |datos_presentacion, tiempo_espera_envio| {
+            respuesta_document(&RespuestaSpec {
+                obligado_nombre: "ANA RUIZ PEREZ",
+                obligado_nif: "12345678Z",
+                csv: Some("A-0000000000000A"),
+                datos_presentacion,
+                tiempo_espera_envio,
+                estado_envio: EstadoEnvio::Correcto,
+                lineas: Vec::new(),
+            })
+        };
+        let receipt = super::DatosPresentacion {
+            nif_presentador: String::from("B93935401"),
+            timestamp_presentacion: String::from("2026-10-05T22:49:41+02:00"),
+        };
+        let read =
+            super::parse_respuesta(&document(Some(receipt.clone()), Some(120))).expect("parses");
+        assert_eq!(read.datos_presentacion, Some(receipt));
+        assert_eq!(read.tiempo_espera_envio, Some(120));
+
+        let read = super::parse_respuesta(&document(None, None)).expect("parses");
+        assert!(document(None, None).contains("<sfR:TiempoEsperaEnvio></sfR:TiempoEsperaEnvio>"));
+        assert_eq!(read.datos_presentacion, None);
+        assert_eq!(read.tiempo_espera_envio, None);
+    }
+
     /// The envío: a surfacing line wins over a draining one, and a
     /// rejected envío with no lines to explain it never completes.
     #[test]
     fn the_envio_verdict_folds_its_lines() {
         let respuesta = |estado_envio, lineas| RespuestaSuministro {
             csv: None,
-            tiempo_espera_envio: 60,
+            datos_presentacion: None,
+            tiempo_espera_envio: Some(60),
             estado_envio,
             lineas,
         };

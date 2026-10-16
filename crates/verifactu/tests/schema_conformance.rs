@@ -15,7 +15,9 @@ use verifactu::engine::consulta::{
     consulta_response_document, ClavePaginacion, ConsultaRequest, ConsultaSpec, EncadenamientoSpec,
     RegistroSpec, ResultadoConsulta,
 };
-use verifactu::engine::response::{EstadoDuplicado, EstadoEnvio, EstadoRegistro, TipoOperacion};
+use verifactu::engine::response::{
+    DatosPresentacion, EstadoDuplicado, EstadoEnvio, EstadoRegistro, TipoOperacion,
+};
 use verifactu::engine::transport::{respuesta_document, DuplicadoSpec, LineaSpec, RespuestaSpec};
 use verifactu::engine::{
     ChainRecord, EmissionContext, FakeSigner, FakeVerifactuTransport, PrevRef, RechazoPrevio,
@@ -691,7 +693,11 @@ proptest! {
     #[test]
     fn the_fakes_respuesta_documents_validate_against_respuesta_suministro(
         csv in proptest::option::of("[A-Z0-9]{16}"),
-        tiempo_espera_envio in 0_u32..=9999,
+        datos_presentacion in proptest::option::of((
+            "[0-9]{8}[A-Z]",
+            "20[0-9]{2}-(0[1-9]|1[0-2])-(0[1-9]|1[0-9]|2[0-8])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\\+0[12]:00",
+        )),
+        tiempo_espera_envio in proptest::option::of(0_u32..=9999),
         estado_envio in pick::<EstadoEnvio>(),
         lineas in proptest::collection::vec(
             (
@@ -731,6 +737,9 @@ proptest! {
             obligado_nombre: "ANA RUIZ PEREZ",
             obligado_nif: "12345678Z",
             csv: csv.as_deref(),
+            datos_presentacion: datos_presentacion.map(|(nif_presentador, timestamp_presentacion)| {
+                DatosPresentacion { nif_presentador, timestamp_presentacion }
+            }),
             tiempo_espera_envio,
             estado_envio,
             lineas,

@@ -642,6 +642,20 @@ async fn the_draft_gates_and_the_sealed_echo() {
         "the sealed instants come from the injected clock: {:?}",
         emitted.kind
     );
+    // AEAT's whole answer rides the emission: the envío's state, its
+    // receipt beside the CSV, and the wait it set.
+    assert_eq!(
+        emitted.emission.estado_envio,
+        Some(crate::response::EstadoEnvio::Correcto)
+    );
+    assert_eq!(
+        emitted.emission.datos_presentacion,
+        Some(crate::response::DatosPresentacion {
+            nif_presentador: String::from("12345678Z"),
+            timestamp_presentacion: String::from("2025-02-03T14:30:00+01:00"),
+        })
+    );
+    assert_eq!(emitted.emission.tiempo_espera_envio, Some(60));
 
     // The cursor round-trips through JSON when `serde` is on.
     #[cfg(feature = "serde")]

@@ -157,7 +157,8 @@ fn correcto_answer() -> String {
         obligado_nombre: "Empresa Ejemplo",
         obligado_nif: "B12345678",
         csv: Some("A-0000000000000A"),
-        tiempo_espera_envio: 60,
+        datos_presentacion: None,
+        tiempo_espera_envio: Some(60),
         estado_envio: EstadoEnvio::Correcto,
         lineas: Vec::new(),
     })

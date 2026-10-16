@@ -461,9 +461,17 @@ pub struct Emission {
     /// AEAT's CSV (16 chars) — store durably at alta time; not
     /// re-fetchable later.
     pub csv: Option<String>,
+    /// Who presented the envío and when AEAT took it, answered with the
+    /// CSV — store it beside the CSV.
+    pub datos_presentacion: Option<response::DatosPresentacion>,
     /// AEAT's mandated wait (seconds) before the next envío: the caller
     /// paces its remissions on it — this crate never sleeps on its behalf.
-    pub tiempo_espera_envio: u64,
+    /// `None` when AEAT set no new wait (the one the caller keeps
+    /// carries), or when the emission never left the site.
+    pub tiempo_espera_envio: Option<u64>,
+    /// The envío as a whole, as AEAT answered it (`None` when it never
+    /// left the site); [`Self::disposition`] folds it with the lines.
+    pub estado_envio: Option<response::EstadoEnvio>,
     pub lineas: Vec<response::RespuestaLinea>,
     pub disposition: response::Disposition,
 }
@@ -477,7 +485,9 @@ impl Emission {
         Self {
             signed_records,
             csv: None,
-            tiempo_espera_envio: 0,
+            datos_presentacion: None,
+            tiempo_espera_envio: None,
+            estado_envio: None,
             lineas: Vec::new(),
             disposition: response::Disposition::Complete,
         }
@@ -749,7 +759,9 @@ impl VerifactuEmitter {
                 Ok(Emission {
                     signed_records,
                     csv: respuesta.csv,
+                    datos_presentacion: respuesta.datos_presentacion,
                     tiempo_espera_envio: respuesta.tiempo_espera_envio,
+                    estado_envio: Some(respuesta.estado_envio),
                     lineas: respuesta.lineas,
                     disposition,
                 })

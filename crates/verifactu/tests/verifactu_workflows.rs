@@ -168,6 +168,15 @@ async fn conservation_alta_is_signed_kept_local_and_never_sent() {
     );
     assert_eq!(emission.csv, None);
     assert_eq!(emission.lineas.len(), 0);
+    assert_eq!(
+        (
+            emission.estado_envio,
+            emission.datos_presentacion,
+            emission.tiempo_espera_envio
+        ),
+        (None, None, None),
+        "AEAT answered nothing"
+    );
 }
 
 #[tokio::test]
