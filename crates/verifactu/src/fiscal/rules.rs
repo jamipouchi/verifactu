@@ -455,9 +455,12 @@ fn check_clave(
         // 18 (recargo de equivalencia) binds nothing: Validaciones v1.0.7
         // lifted the rule keeping recargo under 18 and v1.1.2 deleted its
         // §15.6.9 (1279 and 1280 are gone from the error list), so AEAT
-        // admits recargo under 01 and 18 without it (live-confirmed
-        // 2026-10-16: pruebas answered Correcto an F1 line at 21 % with
-        // recargo 5,2 under 01).
+        // admits recargo under 01 and 18 without it (live-confirmed:
+        // pruebas answered Correcto an F1 line at 21 % with recargo 5,2
+        // under 01 on 2026-10-16, and an F1 and an F2 at 21 % under 18
+        // with no recargo on 2026-10-17). The key names the issuer's
+        // regime, not the recargo; `lines::RegimenEmisor` is where the two
+        // meet.
         _ => true,
     };
     if ok {
@@ -687,38 +690,48 @@ mod tests {
             verdict(F2, "15-11-2024", &[line(200, 1000, 20)], |_| {}),
             Ok(())
         );
+        // The key is the issuer's regime. A general-regime issuer
+        // charging a recargo client declares 01 and carries the recargo...
+        let general = |recargo_rate_cents| lines::RegimenEmisor::General { recargo_rate_cents };
+        let recargo = lines::sujeta_iva_recargo(2100, general(520), 1000);
+        assert_eq!(recargo.clave_regimen, Some(Clave::C01));
         assert_eq!(
-            verdict(
-                F2,
-                DAY,
-                &[lines::sujeta_iva_recargo(2100, 520, 1000)],
-                |_| {}
-            ),
+            recargo.tipo_recargo_equivalencia,
+            Some(Money::from_cents(520))
+        );
+        assert_eq!(
+            recargo.cuota_recargo_equivalencia,
+            Some(Money::from_cents(52))
+        );
+        assert_eq!(
+            verdict(F1, DAY, std::slice::from_ref(&recargo), |_| {}),
             Ok(())
         );
         refused(
             verdict(
                 F2,
                 DAY,
-                &[lines::sujeta_iva_recargo(2100, 140, 1000)],
+                &[lines::sujeta_iva_recargo(2100, general(140), 1000)],
                 |_| {},
             ),
             "§15.3",
         );
-        // The helper declares the recargo's regime; AEAT binds neither
-        // way, so 01 with recargo and 18 without it are admitted too.
-        let recargo = lines::sujeta_iva_recargo(2100, 520, 1000);
-        assert_eq!(recargo.clave_regimen, Some(Clave::C18));
-        let general = DetalleDesglose {
-            clave_regimen: Some(Clave::C01),
+        // ...an issuer in recargo declares its own sale under 18, with none
+        // (live-confirmed 2026-10-17, F1 and F2).
+        let propia =
+            lines::sujeta_iva_recargo(2100, lines::RegimenEmisor::RecargoEquivalencia, 1000);
+        assert_eq!(propia.clave_regimen, Some(Clave::C18));
+        assert_eq!(propia.tipo_recargo_equivalencia, None);
+        assert_eq!(propia.cuota_recargo_equivalencia, None);
+        assert_eq!(propia.cuota_repercutida, Some(Money::from_cents(210)));
+        assert_eq!(verdict(F2, DAY, &[propia], |_| {}), Ok(()));
+        // AEAT binds neither way, so a hand-built 18 with recargo is
+        // admitted too (live-confirmed 2026-10-05, beside 01 on 2026-10-16).
+        let recargo_18 = DetalleDesglose {
+            clave_regimen: Some(Clave::C18),
             ..recargo.clone()
         };
-        assert_eq!(verdict(F1, DAY, &[general], |_| {}), Ok(()));
-        let bare_18 = DetalleDesglose {
-            clave_regimen: Some(Clave::C18),
-            ..iva_super()
-        };
-        assert_eq!(verdict(F1, DAY, &[bare_18], |_| {}), Ok(()));
+        assert_eq!(verdict(F1, DAY, &[recargo_18], |_| {}), Ok(()));
         // AEAT 1284: the recargo's rate and cuota go together.
         let rate_only = DetalleDesglose {
             cuota_recargo_equivalencia: None,

@@ -23,6 +23,7 @@ use verifactu::engine::{
     ChainRecord, EmissionContext, FakeSigner, FakeVerifactuTransport, PrevRef, RechazoPrevio,
     Requerimiento, SiNo, SistemaInformaticoConfig, VerifactuEmitter,
 };
+use verifactu::lines::RegimenEmisor;
 use verifactu::{
     CalificacionOperacion, ChainKind, ClaveRegimen, ConsultaFilter, DetalleDesglose,
     EstadoAlmacenado, FacturaId, FechaExpedicion, FechaHuso, IDDestinatario, IdOtro, IdOtroType,
@@ -206,18 +207,28 @@ fn detalle() -> BoxedStrategy<DetalleDesglose> {
             base.clone()
         )
             .prop_map(|(rate, base)| verifactu::lines::sujeta_iva(rate, base)),
+        // A general-regime issuer's line to a recargo client (01 with the
+        // recargo) or a recargo issuer's own sale (18, none).
         (
             proptest::sample::select(vec![
-                (2100_i64, 520_i64),
-                (2100, 175),
-                (1000, 140),
-                (400, 50)
+                (2100_i64, Some(520_i64)),
+                (2100, Some(175)),
+                (1000, Some(140)),
+                (400, Some(50)),
+                (2100, None),
+                (1000, None),
+                (400, None),
+                (0, None)
             ]),
             base.clone()
         )
-            .prop_map(
-                |((rate, recargo), base)| verifactu::lines::sujeta_iva_recargo(rate, recargo, base)
-            ),
+            .prop_map(|((rate, recargo), base)| {
+                let regimen = recargo
+                    .map_or(RegimenEmisor::RecargoEquivalencia, |recargo_rate_cents| {
+                        RegimenEmisor::General { recargo_rate_cents }
+                    });
+                verifactu::lines::sujeta_iva_recargo(rate, regimen, base)
+            }),
         (
             proptest::sample::select(vec![
                 OperacionExenta::E1,
@@ -805,5 +816,72 @@ proptest! {
             registros,
         });
         assert_schema_valid(respuesta_consulta_lr(), &document);
+    }
+}
+
+/// Both issuer regimes pass the remission gates and remit schema-valid:
+/// a general-regime issuer's line to a recargo client (01 with the
+/// recargo) and a recargo issuer's own sale (18, none).
+#[test]
+fn both_issuer_regimes_remit_schema_valid() {
+    let obligado = Obligado {
+        nombre_razon: String::from("FARMACIA ANA RUIZ PEREZ"),
+        nif: String::from("12345678Z"),
+    };
+    let destinatarios = [IDDestinatario {
+        nombre_razon: String::from("CLIENTE SL"),
+        identificacion: IdentificacionDestinatario::Nif(String::from("B87654321")),
+    }];
+    for (regimen, clave, cuota_total) in [
+        (
+            RegimenEmisor::General {
+                recargo_rate_cents: 520,
+            },
+            ClaveRegimen::C01,
+            2620,
+        ),
+        (RegimenEmisor::RecargoEquivalencia, ClaveRegimen::C18, 2100),
+    ] {
+        let line = verifactu::lines::sujeta_iva_recargo(2100, regimen, 10_000);
+        assert_eq!(line.clave_regimen, Some(clave));
+        let transport = Arc::new(FakeVerifactuTransport::new());
+        let emitter = VerifactuEmitter::new(
+            Modality::Remission,
+            obligado.clone(),
+            sif(&obligado, String::from("1.0")),
+            Arc::new(FakeSigner::new()),
+            fixed_clock(),
+        )
+        .expect("a valid emitter")
+        .with_transport(Arc::clone(&transport) as _);
+        let input = AltaInput {
+            tipo: TipoFactura::F1,
+            serie: Series::F,
+            number: 1,
+            cuota_total: Money::from_cents(cuota_total),
+            importe_total: Money::from_cents(10_000 + cuota_total),
+            descripcion: Some(String::from("medicamentos")),
+            ref_externa: None,
+            lines: vec![line],
+            destinatarios: destinatarios.to_vec(),
+            tipo_rectificativa: None,
+            rectificadas: Vec::new(),
+            importe_rectificacion: None,
+            subsanacion: None,
+            rechazo_previo: None,
+            macrodato: None,
+        };
+        let context = EmissionContext {
+            descripcion_operacion: input.descripcion.as_deref(),
+            desglose: &input.lines,
+            destinatarios: &input.destinatarios,
+            ..EmissionContext::default()
+        };
+        let record = seal(&input, &obligado.nif, false, None);
+        block_on(emitter.submit(&[(record, context)]))
+            .unwrap_or_else(|error| panic!("{clave:?} is admitted: {error}"));
+        let sent = transport.sent_envelopes();
+        assert_eq!(sent.len(), 1);
+        assert_schema_valid(suministro_lr(), &payload_of(&sent[0]));
     }
 }

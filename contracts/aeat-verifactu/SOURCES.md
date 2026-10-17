@@ -8,7 +8,7 @@ vocabularies). The PDFs and the other schemas are **not** vendored: their
 facts live in the tables below, their identity in the hashes. **Never
 fetch anything at test time** — this directory is the offline truth.
 
-Retrieval date: **2026-09-28** (the QR document: **2026-10-05**; the validations document: **2026-10-11**). To
+Retrieval date: **2026-09-28** (the QR document: **2026-10-05**; the validations document: **2026-10-11**; the record design and the libros registro FAQ: **2026-10-17**). To
 refresh a snapshot, download it from the URL below, check the new hash
 against the old one, and land the bytes, the hash and every code change
 the diff implies in one commit.
@@ -30,6 +30,8 @@ the diff implies in one commit.
 | `DetalleEspecificacTecnCodigoQRfactura.pdf` | no | 786534 | `f86b3c260d8a4963dbc18c5007732b53199156c5d1db63242e68db71501b49eb` | `https://www.agenciatributaria.es/static_files/AEAT_Desarrolladores/EEDD/IVA/VERI-FACTU/DetalleEspecificacTecnCodigoQRfactura.pdf` (v0.5.0: the QR law) |
 | `Validaciones_Errores_Veri-Factu.pdf` | no | 658946 | `426eb926fc098a36a163f66ca5f40d9e0847ca23300bbe5008979832d3513440` | `https://www.agenciatributaria.es/static_files/AEAT_Desarrolladores/EEDD/IVA/VERI-FACTU/Validaciones_Errores_Veri-Factu.pdf` (v1.2.2, 2026-04-08, retrieved 2026-10-11: which records AEAT rejects and which it accepts with errors — the law behind the gates in `fiscal/xml.rs`) |
 | `errores.properties` | no | 25232 | `06519ceb23422bd6b0ad3bfb659e3007615050da4920781d12cff536481d5902` | `https://www2.agenciatributaria.gob.es/static_files/common/internet/dep/aplicaciones/es/aeat/tikeV1.0/cont/ws/errores.properties` (ISO-8859-1, retrieved 2026-10-11: AEAT's complete error list, which Validaciones §4.4 names as the authority — rejection of the envío, rejection of the record, acceptance with errors; the gates cite its codes) |
+| `DsRegistroVeriFactu.xlsx` | no | 59877 | `40ce191aa1def6e44a5f1e86d7ece727258745b34e3fe4d6abe1468252dac2ca` | `https://www.agenciatributaria.es/static_files/AEAT_Desarrolladores/EEDD/IVA/VERI-FACTU/DsRegistroVeriFactu.xlsx` (Diseños de registro v1.0, 2024-10-28: the record fields and the lists — L8A, sheet "6)Listas", is the IVA `ClaveRegimen` list, 18 "Recargo de equivalencia."; `lines::RegimenEmisor` cites it) |
+| `FAQs_Pre303_22v1_5.pdf` | no | 1495299 | `2182e6b9b1340ff63f4181ec4c050cd89868914dc49db9a47adb354b98c8eb47` | `https://sede.agenciatributaria.gob.es/static_files/Sede/Tema/IVA/PRE_303/FAQs_Pre303_22v1_5.pdf` (the libros registro FAQ, Pre303/LSI: §2.17 defines keys 18/19 as the operations of taxpayers in RERE/REAGYP, §2.18 records a recargo charged under 01 — the issuer reading of `ClaveRegimen` 18) |
 
 ## XAdES policy digest facts (for the `xades` policy registry)
 

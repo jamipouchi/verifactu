@@ -67,28 +67,67 @@ pub mod lines {
         }
     }
 
-    /// An IVA line under recargo de equivalencia, declared under
-    /// `ClaveRegimen` 18, the regime L8A names for it (live-confirmed
-    /// 2026-10-05: pruebas answered `Correcto` an S1 line at 21 % with
-    /// recargo 5,2 under 18): `rate_cents` (2100 = 21,00 %) and
-    /// `recargo_rate_cents` (520 = 5,20 %) over `base_cents`, both cuotas
-    /// computed from their pair. AEAT admits only the recargo each rate
-    /// pairs with (21 → 5,2 or 1,75; 10 → 1,4; 4 → 0,5; Validaciones
-    /// §15.3).
+    /// The issuer's IVA regime on a line that touches recargo de
+    /// equivalencia, which is what `ClaveRegimen` declares: the key is
+    /// the issuer's, never the client's or the line's.
+    ///
+    /// L8A (Diseños de registro v1.0, sheet "6)Listas") lists 18
+    /// "Recargo de equivalencia." among the issuer's regimes, beside 19
+    /// (REAGYP) and 20 (simplificado). The libros registro key it is
+    /// taken from is the issuer's activity in the regime (libros registro
+    /// FAQ, `FAQs_Pre303_22v1_5` §2.17: keys 18 and 19 record "las
+    /// operaciones de contribuyentes en RERE y REAGYP"), while a
+    /// general-regime issuer records the recargo it charges under 01
+    /// (§2.18). A seller in the regime charges no recargo, its suppliers
+    /// do ("Los proveedores de los minoristas les repercutirán, además
+    /// del IVA, el recargo de equivalencia", Manual práctico IVA 2025,
+    /// ch. 6), so 18 never pairs with recargo amounts here. The
+    /// Veri*FACTU FAQ ("Soy titular de una oficina de farmacia que
+    /// tributo en el régimen especial del recargo de equivalencia…")
+    /// puts such a seller's invoices in the system.
+    ///
+    /// AEAT itself binds neither way: Validaciones v1.2.2 ties recargo to
+    /// S1 (1281), to its cuota (1284) and to its rate's pair (§15.3), not
+    /// to a key, and pruebas answered `Correcto` recargo 5,2 at 21 % under
+    /// 18 (live, 2026-10-05) and under 01 (live, 2026-10-16), and 18 with
+    /// no recargo on an F1 and an F2 (live, 2026-10-17). The other
+    /// combinations stay open through a hand-built [`DetalleDesglose`].
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum RegimenEmisor {
+        /// `ClaveRegimen` 01: a general-regime issuer (a wholesaler, or a
+        /// pharmacy invoicing a client in recargo) charging its client
+        /// the recargo at `recargo_rate_cents` (520 = 5,20 %). Without a
+        /// recargo client the line is [`sujeta_iva`].
+        General { recargo_rate_cents: i64 },
+        /// `ClaveRegimen` 18: an issuer in recargo de equivalencia (a
+        /// retail pharmacy) declaring its own sale, with no recargo.
+        RecargoEquivalencia,
+    }
+
+    /// An S1 IVA line at `rate_cents` (2100 = 21,00 %) over `base_cents`,
+    /// declared under the issuer's [`RegimenEmisor`]. The recargo fields
+    /// follow the regime's rate alone, each cuota computed from its pair.
+    /// AEAT admits only the recargo each rate pairs with (21 → 5,2 or
+    /// 1,75; 10 → 1,4; 4 → 0,5; Validaciones §15.3).
     #[must_use]
     pub fn sujeta_iva_recargo(
         rate_cents: i64,
-        recargo_rate_cents: i64,
+        regimen: RegimenEmisor,
         base_cents: i64,
     ) -> DetalleDesglose {
-        DetalleDesglose {
-            clave_regimen: Some(crate::fiscal::ClaveRegimen::C18),
-            tipo_recargo_equivalencia: Some(Money::from_cents(recargo_rate_cents)),
-            cuota_recargo_equivalencia: Some(Money::from_cents(cuota_cents(
-                recargo_rate_cents,
-                base_cents,
-            ))),
-            ..sujeta_iva(rate_cents, base_cents)
+        match regimen {
+            RegimenEmisor::General { recargo_rate_cents } => DetalleDesglose {
+                tipo_recargo_equivalencia: Some(Money::from_cents(recargo_rate_cents)),
+                cuota_recargo_equivalencia: Some(Money::from_cents(cuota_cents(
+                    recargo_rate_cents,
+                    base_cents,
+                ))),
+                ..sujeta_iva(rate_cents, base_cents)
+            },
+            RegimenEmisor::RecargoEquivalencia => DetalleDesglose {
+                clave_regimen: Some(crate::fiscal::ClaveRegimen::C18),
+                ..sujeta_iva(rate_cents, base_cents)
+            },
         }
     }
 
