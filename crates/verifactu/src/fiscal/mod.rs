@@ -875,9 +875,8 @@ impl VerifactuEmitter {
             || !referencia.chars().all(|c| c.is_ascii_alphanumeric())
         {
             return Err(EmitError::InvalidRecord {
-                detail: format!(
-                    "RefRequerimiento must be 1..18 ASCII alphanumerics (TextMax18, AEAT 4133), \
-                     got {referencia:?}"
+                detail: String::from(
+                    "RefRequerimiento must be 1..18 ASCII alphanumerics (TextMax18, AEAT 4133)",
                 ),
             });
         }
@@ -921,10 +920,9 @@ impl VerifactuEmitter {
         }
         if !events::is_known_tipo_evento(&event.tipo_evento) {
             return Err(EmitError::InvalidRecord {
-                detail: format!(
-                    "unknown TipoEvento {:?} — the vocabulary is closed at the emit boundary \
-                     (a typo must never enter the event chain)",
-                    event.tipo_evento
+                detail: String::from(
+                    "unknown TipoEvento — the vocabulary is closed at the emit boundary (a \
+                     typo must never enter the event chain)",
                 ),
             });
         }
@@ -1144,5 +1142,270 @@ mod tests {
             obligado_at < repr_at && repr_at < remision_at,
             "the SI.xsd order: {doc}"
         );
+    }
+
+    /// `error` names `names` (a field, a code) and leaves `value` out of
+    /// its text.
+    fn names_never_echoes(error: &impl std::fmt::Display, names: &str, value: &str) {
+        let text = error.to_string();
+        assert!(text.contains(names), "names {names}: {text}");
+        assert!(!text.contains(value), "echoes {value:?}: {text}");
+    }
+
+    fn fecha() -> crate::domain::chain::FechaExpedicion {
+        crate::domain::chain::FechaExpedicion::parse("03-02-2025").expect("dd-mm-yyyy")
+    }
+
+    fn huso() -> crate::domain::chain::FechaHuso {
+        crate::domain::chain::FechaHuso::parse("2025-02-03T14:30:00+01:00").expect("ISO-8601")
+    }
+
+    /// Through conservation's gates: identification binds every regime,
+    /// and no business rule runs ahead of it.
+    fn refused(
+        record: &crate::domain::chain::ChainRecord,
+        ctx: &EmissionContext<'_>,
+        obligado: &Obligado,
+    ) -> super::xml::SerializeError {
+        super::xml::record_node(record, ctx, obligado, &sif(), Modality::Conservation)
+            .expect_err("refused")
+    }
+
+    /// A refusal names the field and the rule, never the party: at every
+    /// identifier of an alta the refused NIF, `IDOtro` or name stays out of
+    /// the text a consumer logs.
+    #[test]
+    fn an_alta_refusal_names_the_field_never_the_party() {
+        use super::{FacturaId, IDDestinatario, IdOtro, IdOtroType, IdentificacionDestinatario};
+        use crate::domain::chain::{ChainKind, PrevRef};
+        use crate::domain::series::Series;
+
+        let issued_by = |nif: &str| {
+            let mut record = primer_alta_record();
+            if let ChainKind::Alta { issuer, .. } = &mut record.kind {
+                *issuer = nif.to_owned();
+            }
+            record
+        };
+        let ctx = alta_ctx();
+        let error = refused(&issued_by("1234567Z"), &ctx, &obligado());
+        names_never_echoes(&error, "IDFactura/IDEmisorFactura", "1234567Z");
+        let otro_obligado = Obligado {
+            nif: String::from("B-2345678"),
+            ..obligado()
+        };
+        let error = refused(&primer_alta_record(), &ctx, &otro_obligado);
+        names_never_echoes(&error, "Cabecera/ObligadoEmision/NIF", "B-2345678");
+        // AEAT 1108 names neither NIF.
+        let error = refused(&issued_by("A87654321"), &ctx, &obligado());
+        names_never_echoes(&error, "AEAT 1108", "A87654321");
+        names_never_echoes(&error, "IDFactura/IDEmisorFactura", "B12345678");
+
+        let mut chained = primer_alta_record();
+        chained.prev = Some(PrevRef {
+            issuer: String::from("B 2345678"),
+            serie: Series::T,
+            number: 41,
+            fecha_expedicion: fecha(),
+            huella: "0".repeat(64),
+        });
+        let error = refused(&chained, &ctx, &obligado());
+        names_never_echoes(&error, "RegistroAnterior/IDEmisorFactura", "B 2345678");
+
+        let rectificadas = [FacturaId {
+            nif: String::from("B9876543"),
+            num_serie: String::from("T00000041"),
+            fecha_expedicion: fecha(),
+        }];
+        let rectificativa = EmissionContext {
+            facturas_rectificadas: &rectificadas,
+            ..alta_ctx()
+        };
+        let error = refused(&primer_alta_record(), &rectificativa, &obligado());
+        names_never_echoes(&error, "IDFacturaRectificada/IDEmisorFactura", "B9876543");
+
+        let destinatario = |nombre_razon: &str, identificacion| {
+            let destinatarios = [IDDestinatario {
+                nombre_razon: nombre_razon.to_owned(),
+                identificacion,
+            }];
+            let ctx = EmissionContext {
+                destinatarios: &destinatarios,
+                ..alta_ctx()
+            };
+            refused(&primer_alta_record(), &ctx, &obligado())
+        };
+        let nif = |nif: &str| IdentificacionDestinatario::Nif(nif.to_owned());
+        let otro = |id_type, pais: &str, id: &str| {
+            IdentificacionDestinatario::Otro(IdOtro {
+                codigo_pais: Some(pais.to_owned()),
+                id_type,
+                id: id.to_owned(),
+            })
+        };
+        let error = destinatario("CLIENTE", nif("12345678-Z"));
+        names_never_echoes(&error, "IDDestinatario/NIF", "12345678-Z");
+        let error = destinatario("CLIENTE", otro(IdOtroType::NifIva, "DE", "DE12345678"));
+        names_never_echoes(&error, "IDDestinatario/IDOtro/ID", "DE12345678");
+        let error = destinatario("CLIENTE", otro(IdOtroType::NoCensado, "ES", "12345678A"));
+        names_never_echoes(&error, "IDDestinatario/IDOtro/ID", "12345678A");
+        names_never_echoes(&error, "AEAT 1131", "12345678A");
+        let error = destinatario("CLIENTE", otro(IdOtroType::Pasaporte, "ZZ", "12AB34567"));
+        names_never_echoes(&error, "IDDestinatario/IDOtro/CodigoPais", "ZZ");
+        names_never_echoes(&error, "CountryType2", "12AB34567");
+        let error = destinatario(&"ANA RUIZ PEREZ ".repeat(9), nif("12345678Z"));
+        names_never_echoes(&error, "IDDestinatario/NombreRazon", "ANA RUIZ");
+    }
+
+    /// The anulación's and the evento's identifiers, and the evento's
+    /// free-text `TipoEvento`, under the same law.
+    #[test]
+    fn an_anulacion_or_evento_refusal_names_the_field_never_the_party() {
+        use super::events::{evento_data, evento_restore, EventoSif};
+        use super::xml::evento_node;
+        use crate::domain::chain::{ChainKind, ChainRecord};
+        use crate::domain::series::Series;
+
+        let anulacion = |issuer: &str| ChainRecord {
+            kind: ChainKind::Anulacion {
+                issuer: issuer.to_owned(),
+                serie: Series::T,
+                number: 42,
+                fecha_expedicion: fecha(),
+                fecha_huso_gen: huso(),
+            },
+            fecha: EMISSION_INSTANT,
+            prev: None,
+            prev_evento_huella: None,
+            huella: String::new(),
+        };
+        let ctx = alta_ctx();
+        let error = refused(&anulacion("1234567Z"), &ctx, &obligado());
+        names_never_echoes(&error, "IDFactura/IDEmisorFacturaAnulada", "1234567Z");
+        // §3.1.4.1 names neither NIF.
+        let error = refused(&anulacion("A87654321"), &ctx, &obligado());
+        names_never_echoes(&error, "§3.1.4.1", "A87654321");
+        names_never_echoes(&error, "IDFactura/IDEmisorFacturaAnulada", "B12345678");
+
+        let producer = |nif: &str| EventoSif {
+            nif: nif.to_owned(),
+            id: String::new(),
+            id_sistema_informatico: String::from("01"),
+            version: String::from("0.1.0"),
+            numero_instalacion: String::from("1"),
+        };
+        let evento = |event| {
+            ChainRecord::seal(
+                ChainKind::Evento {
+                    event,
+                    fecha_huso_gen_evento: huso(),
+                },
+                EMISSION_INSTANT,
+                None,
+            )
+        };
+        let none = EmissionContext::default();
+        let record = evento(evento_restore(&producer("B9876543"), "B12345678"));
+        let error = evento_node(&record, &none).expect_err("refused");
+        names_never_echoes(&error, "Evento/SistemaInformatico/NIF", "B9876543");
+        let record = evento(evento_restore(&producer("B12345678"), "Q-1234567"));
+        let error = evento_node(&record, &none).expect_err("refused");
+        names_never_echoes(&error, "Evento/ObligadoEmision/NIF", "Q-1234567");
+        let typo = evento(evento_data(
+            &producer("B12345678"),
+            "B12345678",
+            "RESTAURACION_BACKUP",
+        ));
+        let error = emitter(Modality::Remission)
+            .check(&typo, &none)
+            .expect_err("refused");
+        names_never_echoes(&error, "TipoEvento", "RESTAURACION_BACKUP");
+    }
+
+    /// The doors that take an identity or a reference before any record:
+    /// the producer, the obligado, the representante, the requerimiento,
+    /// the consulta.
+    #[test]
+    fn a_door_refusal_names_the_field_never_the_party() {
+        use super::consulta::{
+            consulta_document, ClavePaginacion, ConsultaFilter, ConsultaRequest,
+        };
+        use super::{Requerimiento, SistemaInformaticoConfig};
+
+        let producer = SistemaInformaticoConfig {
+            nif: String::from("B1234567Q9"),
+            ..sif()
+        };
+        let error = producer.validate().expect_err("refused");
+        names_never_echoes(&error, "SistemaInformatico/NIF", "B1234567Q9");
+        let id_sistema = SistemaInformaticoConfig {
+            id_sistema_informatico: String::from("ñ1"),
+            ..sif()
+        };
+        let error = id_sistema.validate().expect_err("refused");
+        names_never_echoes(&error, "SistemaInformatico/IdSistemaInformatico", "ñ1");
+
+        let otro_obligado = Obligado {
+            nif: String::from("B-2345678"),
+            ..obligado()
+        };
+        let Err(error) = VerifactuEmitter::new(
+            Modality::Remission,
+            otro_obligado.clone(),
+            sif(),
+            Arc::new(FakeSigner::new()),
+            Arc::new(FakeClock::new(Timestamp(EMISSION_INSTANT))),
+        ) else {
+            panic!("the obligado's NIF is refused");
+        };
+        names_never_echoes(&error, "ObligadoEmision/NIF", "B-2345678");
+        let Err(error) = emitter(Modality::Remission).with_representante(Obligado {
+            nombre_razon: String::from("ASESOR EJEMPLO SL"),
+            nif: String::from("B8765432"),
+        }) else {
+            panic!("the representante's NIF is refused");
+        };
+        names_never_echoes(&error, "Representante/NIF", "B8765432");
+        let requerido = EmissionContext {
+            requerimiento: Some(Requerimiento {
+                referencia: String::from("REQ-2026-001"),
+                fin: true,
+            }),
+            ..alta_ctx()
+        };
+        let error = emitter(Modality::Remission)
+            .check(&primer_alta_record(), &requerido)
+            .expect_err("refused");
+        names_never_echoes(&error, "AEAT 4133", "REQ-2026-001");
+
+        let filtro = ConsultaFilter::new(2026, super::consulta::Mes::ENERO);
+        let consulta =
+            |filtro: &ConsultaFilter<'_>, obligado: &Obligado, clave: Option<&ClavePaginacion>| {
+                consulta_document(&ConsultaRequest {
+                    obligado,
+                    apoderado: false,
+                    filtro,
+                    clave_paginacion: clave,
+                })
+                .expect_err("refused")
+            };
+        let error = consulta(&filtro, &otro_obligado, None);
+        names_never_echoes(&error, "Consulta/ObligadoEmision/NIF", "B-2345678");
+        let clave = ClavePaginacion {
+            id_emisor_factura: String::from("B 2345678"),
+            num_serie_factura: String::from("T00000041"),
+            fecha_expedicion_factura: String::from("03-02-2025"),
+        };
+        let error = consulta(&filtro, &obligado(), Some(&clave));
+        names_never_echoes(
+            &error,
+            "Consulta/ClavePaginacion/IDEmisorFactura",
+            "B 2345678",
+        );
+        // NumSerieFactura is the caller's free text: its edge-whitespace
+        // refusal leaves it out too.
+        let error = consulta(&filtro.num_serie(" T00000041"), &obligado(), None);
+        names_never_echoes(&error, "Consulta/NumSerieFactura", "T00000041");
+        names_never_echoes(&error, "edge whitespace", "T00000041");
     }
 }

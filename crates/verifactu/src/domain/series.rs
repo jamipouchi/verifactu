@@ -23,7 +23,7 @@ impl Series {
 
     /// Total by design: an unknown prefix is [`Series::Custom`], never
     /// an error — the draft gates (empty prefix, prefix length) fire at
-    /// `InvoiceDraft::build`, where the error can name the input.
+    /// `InvoiceDraft::build`, whose error names the broken law.
     #[must_use]
     pub fn parse(prefix: &str) -> Self {
         match prefix {

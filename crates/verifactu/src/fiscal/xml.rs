@@ -30,6 +30,10 @@ const TIPO_HUELLA: &str = "01";
 /// (fuzz-found); 16 is already far past AEAT's ≤6-deep documents.
 const MAX_ELEMENT_DEPTH: usize = 16;
 
+/// A refusal names the field and the rule it breaks, never a party's
+/// NIF, ID or name nor other free text the caller supplied (one
+/// offending character, a length or a count may stay): the text reaches
+/// a consumer's logs and incident records.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SerializeError {
     #[error("field {field}: {problem}")]
@@ -194,14 +198,15 @@ fn encadenamiento(record: &ChainRecord) -> Result<String, SerializeError> {
 /// `NIFType` is any 9 characters; every NIF, NIE and CIF is 9 ASCII
 /// alphanumerics — anything else (edge whitespace the huella cadena
 /// would trim, a non-ASCII character AEAT's validator counts twice) can
-/// only be a typo, refused before it is hashed.
+/// only be a typo, refused before it is hashed. The refusal never
+/// echoes the value: a NIF names a party.
 pub(crate) fn check_nif(field: &'static str, nif: &str) -> Result<(), SerializeError> {
     if nif.len() == 9 && nif.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
         return Ok(());
     }
     Err(SerializeError::Field {
         field,
-        problem: format!("a NIF is 9 ASCII alphanumerics (NIFType), got {nif:?}"),
+        problem: String::from("a NIF is 9 ASCII alphanumerics (NIFType)"),
     })
 }
 
@@ -263,7 +268,7 @@ pub(crate) fn check_id_sistema_informatico(
     }
     Err(SerializeError::Field {
         field,
-        problem: format!("two of A-Z or 0-9 (AEAT Validaciones §3.1.5), got {id:?}"),
+        problem: String::from("two of A-Z or 0-9 (AEAT Validaciones §3.1.5)"),
     })
 }
 
@@ -277,7 +282,7 @@ pub(crate) fn check_num_serie(field: &'static str, value: &str) -> Result<(), Se
     } else if value.is_empty() || value.len() > 60 {
         format!("must be 1..=60 chars, got {}", value.len())
     } else if value.trim() != value {
-        format!("{value:?} carries edge whitespace the huella would trim")
+        String::from("carries edge whitespace the huella would trim (HS §3)")
     } else {
         return Ok(());
     };
@@ -490,10 +495,9 @@ fn check_alta(
     if *issuer != obligado.nif {
         return Err(SerializeError::Field {
             field: "IDFactura/IDEmisorFactura",
-            problem: format!(
-                "record issuer {issuer} differs from the configured obligado NIF {} — the \
-                 emitter's identity and the record's must be one",
-                obligado.nif
+            problem: String::from(
+                "must be the configured obligado's NIF (AEAT 1108, §3.1.3.1) — the emitter's \
+                 identity and the record's are one",
             ),
         });
     }
@@ -617,12 +621,10 @@ fn check_destinatario(
         None => {}
         Some(pais) => {
             if CODIGOS_PAIS.binary_search(&pais.as_str()).is_err() {
-                return Err(SerializeError::Field {
-                    field: "IDDestinatario/IDOtro/CodigoPais",
-                    problem: format!(
-                        "{pais:?} is not a CountryType2 code (uppercase ISO 3166-1 alpha-2)"
-                    ),
-                });
+                return refuse(
+                    "IDDestinatario/IDOtro/CodigoPais",
+                    "must be a CountryType2 code (SI.xsd: uppercase ISO 3166-1 alpha-2)",
+                );
             }
             // A NIF-IVA names its state in its prefix; EL and XI are no
             // CountryType2 code, so those ride without CodigoPais.
@@ -649,24 +651,18 @@ fn check_destinatario(
         );
     }
     if otro.id_type == IdOtroType::NifIva && !is_nif_iva(&otro.id, fecha) {
-        return Err(SerializeError::Field {
-            field: "IDDestinatario/IDOtro/ID",
-            problem: format!(
-                "{:?} is not a member state's NIF-IVA (prefix + number, uppercase) (§3.1.3.13, \
-                 Nota 1)",
-                otro.id
-            ),
-        });
+        return refuse(
+            "IDDestinatario/IDOtro/ID",
+            "IDType 02 requires a member state's NIF-IVA (prefix + number, uppercase) \
+             (§3.1.3.13, Nota 1)",
+        );
     }
     if otro.id_type == IdOtroType::NoCensado && !is_persona_fisica_nif(&otro.id) {
-        return Err(SerializeError::Field {
-            field: "IDDestinatario/IDOtro/ID",
-            problem: format!(
-                "{:?} is not a natural person's NIF (DNI, NIE or K/L/M with its control \
-                 letter), which IDType 07 requires (AEAT 1131)",
-                otro.id
-            ),
-        });
+        return refuse(
+            "IDDestinatario/IDOtro/ID",
+            "IDType 07 requires a natural person's NIF (DNI, NIE or K/L/M with its control \
+             letter) (AEAT 1131)",
+        );
     }
     check_text("IDDestinatario/IDOtro/ID", &otro.id, 20)
 }
@@ -812,10 +808,7 @@ pub(crate) fn registro_anulacion(
     if *issuer != obligado.nif {
         return Err(SerializeError::Field {
             field: "IDFactura/IDEmisorFacturaAnulada",
-            problem: format!(
-                "anulada issuer {issuer} differs from the configured obligado NIF {}",
-                obligado.nif
-            ),
+            problem: String::from("must be the configured obligado's NIF (§3.1.4.1)"),
         });
     }
     if let Some(ref_ext) = ctx.ref_externa {
@@ -1330,7 +1323,9 @@ fn find_tag_end(xml: &str, start: usize) -> Option<(usize, bool)> {
 mod tests {
     use proptest::prelude::Strategy as _;
 
-    use super::{check_text, escape_text, parse_tree, registro_alta, EmissionContext, Tree};
+    use super::{
+        check_nif, check_text, escape_text, parse_tree, registro_alta, EmissionContext, Tree,
+    };
     use crate::fiscal::tests_support::{iva_super, obligado, primer_alta_record, sif};
     use crate::fiscal::Modality;
 
@@ -1419,6 +1414,8 @@ mod tests {
         }
     }
 
+    const NIF_FIELD: &str = "IDDestinatario/NIF";
+
     proptest::proptest! {
         #![proptest_config(proptest::prelude::ProptestConfig::with_cases(512))]
 
@@ -1428,6 +1425,25 @@ mod tests {
                 .prop_map(|chars| chars.into_iter().collect::<String>()),
         ) {
             assert_char_law(&text);
+        }
+
+        /// A refused NIF never reaches its error's text, NIF-shaped or
+        /// arbitrary. An input the fixed message already holds proves
+        /// nothing, so the generator leaves it out.
+        #[test]
+        fn a_refused_nif_never_reaches_the_error_text(
+            nif in proptest::prop_oneof![
+                "[A-Z0-9 .-]{3,12}",
+                proptest::collection::vec(proptest::char::any(), 3..24)
+                    .prop_map(|chars| chars.into_iter().collect::<String>()),
+            ]
+            .prop_filter("a refused NIF the fixed message does not hold", |nif| {
+                let fixed = check_nif(NIF_FIELD, "").expect_err("empty").to_string();
+                check_nif(NIF_FIELD, nif).is_err() && !fixed.contains(nif.as_str())
+            }),
+        ) {
+            let error = check_nif(NIF_FIELD, &nif).expect_err("refused").to_string();
+            proptest::prop_assert!(!error.contains(&nif), "{error}");
         }
     }
 

@@ -324,7 +324,9 @@ impl Disposition {
 
 /// Formats one line's AEAT error detail for a disposition note — the ONE
 /// formatter for this shape (a consumer's per-line detail delegates here,
-/// so the AEAT note format has a single law home).
+/// so the AEAT note format has a single law home). The factura is named
+/// by its number and date, never by the issuer's NIF: a note reaches a
+/// consumer's incident records, and an autónomo's NIF names a person.
 #[must_use]
 pub fn line_note(linea: &RespuestaLinea) -> String {
     let codigo = linea
@@ -335,8 +337,8 @@ pub fn line_note(linea: &RespuestaLinea) -> String {
         .as_deref()
         .unwrap_or("sin descripción");
     format!(
-        "NIF {} NumSerie {} fecha {}: {} {}",
-        linea.nif, linea.num_serie_factura, linea.fecha_expedicion_factura, codigo, descripcion
+        "NumSerie {} fecha {}: {} {}",
+        linea.num_serie_factura, linea.fecha_expedicion_factura, codigo, descripcion
     )
 }
 
@@ -463,6 +465,11 @@ mod tests {
             panic!("a duplicate of an annulled record is the operator's");
         };
         assert!(note.contains("ANULADO"));
+        // The factura by its number and date, never the issuer's NIF.
+        assert!(
+            note.contains("T00000001") && !note.contains("B12345678"),
+            "{note}"
+        );
     }
 
     /// AEAT's receipt reads whole, and an empty `TiempoEsperaEnvio` is

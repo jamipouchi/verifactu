@@ -187,7 +187,10 @@ Rules for new tests:
 - **Comments** state the law or the reason, never the history. Match
   the existing voice: short, precise, citing the source.
 - **Secrets**: `Debug` impls redact signer, key and certificate
-  material, and errors never echo archive bytes.
+  material, errors never echo archive bytes, and a gate's refusal
+  names the field and the rule, never a party's NIF, ID or name nor
+  other free text the caller supplied (one offending character, a
+  length or a count may stay).
 - **Contracts**: refreshing an AEAT artifact follows
   `contracts/aeat-verifactu/SOURCES.md`. The hash changes in the same
   commit as the bytes and the code the diff implies.
