@@ -92,7 +92,7 @@ pub(crate) fn check_alta(
     }
     check_destinatarios(ctx, tipo)?;
     for detalle in ctx.desglose {
-        check_detalle(detalle, ctx, tipo, date)?;
+        check_detalle(detalle, ctx, tipo, date, generado.ymd())?;
     }
     if tipo == TipoFactura::F2 {
         let total: i64 = ctx
@@ -219,6 +219,7 @@ fn check_detalle(
     ctx: &EmissionContext<'_>,
     tipo: TipoFactura,
     date: Ymd,
+    generado: Ymd,
 ) -> Result<(), SerializeError> {
     let iva = matches!(d.impuesto, None | Some(Impuesto::Iva));
     let igic = d.impuesto == Some(Impuesto::Igic);
@@ -328,7 +329,14 @@ fn check_detalle(
             ));
         }
     }
-    // §15.6 — ClaveRegimen by tax, then per clave.
+    // §15.6 — ClaveRegimen by tax, then per clave. IPSI: §15.6 and §4.3.1
+    // promise an aviso until 31-12-2026 for a clave off its list or a
+    // missing one, and rejection from 01-01-2027. AEAT already rejects the
+    // clave off the list and keeps the aviso for the missing one
+    // (live-confirmed 2026-10-22: an IPSI line under 03 answered 1246, one
+    // without a clave AceptadoConErrores 2009). The missing clave's cutover
+    // is measured at reception, which the record's generation stands for:
+    // loose by the days between them.
     match (d.impuesto, d.clave_regimen) {
         (Some(Impuesto::Otros), Some(_)) => {
             return Err(refuse(
@@ -342,18 +350,21 @@ fn check_detalle(
                 "required with IVA and IGIC (AEAT 1245, §15.6)",
             ));
         }
-        (Some(Impuesto::Ipsi), clave)
-            if date >= (2027, 1, 1)
-                && !matches!(
-                    clave,
-                    Some(
-                        Clave::C01 | Clave::C08 | Clave::C11 | Clave::C18 | Clave::C19 | Clave::C20
-                    )
-                ) =>
+        (Some(Impuesto::Ipsi), None) if generado >= (2027, 1, 1) => {
+            return Err(refuse(
+                "DetalleDesglose/ClaveRegimen",
+                "required with IPSI on a record generated from 01-01-2027 (§15.6, AEAT 1245)",
+            ));
+        }
+        (Some(Impuesto::Ipsi), Some(clave))
+            if !matches!(
+                clave,
+                Clave::C01 | Clave::C08 | Clave::C11 | Clave::C18 | Clave::C19 | Clave::C20
+            ) =>
         {
             return Err(refuse(
                 "DetalleDesglose/ClaveRegimen",
-                "IPSI requires 01, 08, 11, 18, 19 or 20 from 01-01-2027 (§15.6)",
+                "IPSI admits 01, 08, 11, 18, 19 or 20 (§15.6, AEAT 1246)",
             ));
         }
         _ => {}
@@ -679,6 +690,51 @@ mod tests {
         };
         assert_eq!(run(DAY, "2025-02-03T23:59:59+01:00"), Ok(()));
         refused(run(DAY, "2025-02-02T23:59:59+01:00"), "1112");
+    }
+
+    /// §15.6 as AEAT applies it: a clave off IPSI's list is refused now,
+    /// a missing one only on a record generated from 01-01-2027.
+    #[test]
+    fn the_ipsi_claves_as_aeat_applies_them() {
+        let ipsi = |clave| {
+            [DetalleDesglose {
+                impuesto: Some(Impuesto::Ipsi),
+                clave_regimen: clave,
+                ..iva_super()
+            }]
+        };
+        let run = |lines: &[DetalleDesglose], generado: &str| {
+            check_alta(
+                &EmissionContext {
+                    descripcion_operacion: Some("venta"),
+                    desglose: lines,
+                    ..EmissionContext::default()
+                },
+                F2,
+                &fecha("31-12-2026"),
+                &FechaHuso::parse(generado).expect("an ISO instant"),
+                "T00000001",
+                Money::from_cents(1210),
+            )
+            .map_err(|error| error.to_string())
+        };
+        let before = "2026-12-31T23:59:59+01:00";
+        let after = "2027-01-01T00:00:00+01:00";
+        for clave in [
+            Clave::C01,
+            Clave::C08,
+            Clave::C11,
+            Clave::C18,
+            Clave::C19,
+            Clave::C20,
+        ] {
+            assert_eq!(run(&ipsi(Some(clave)), after), Ok(()));
+        }
+        for clave in [Clave::C02, Clave::C03, Clave::C14] {
+            refused(run(&ipsi(Some(clave)), before), "1246");
+        }
+        assert_eq!(run(&ipsi(None), before), Ok(()));
+        refused(run(&ipsi(None), after), "1245");
     }
 
     #[test]
