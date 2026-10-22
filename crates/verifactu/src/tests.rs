@@ -376,6 +376,7 @@ fn consulta_registro_page(number: u64) -> crate::fiscal::consulta::RegistroSpec 
             None,
             "2026-10-05T12:00:00+02:00",
         )),
+        sistema_informatico: None,
     }
 }
 

@@ -1,10 +1,13 @@
 //! The scripted consulta answers the fake transport renders — test
 //! tooling (feature `fakes`).
 
-use super::{ClavePaginacion, EstadoAlmacenado, Mes, ResultadoConsulta};
+use super::{
+    ClavePaginacion, EstadoAlmacenado, Mes, ResultadoConsulta, SistemaInformaticoAlmacenado,
+};
 use crate::domain::chain::TipoFactura;
 use crate::domain::money::Money;
 use crate::fiscal::xml::{self, tag};
+use crate::fiscal::IdentificacionDestinatario;
 
 const NS_RESPUESTA_CONSULTA: &str = "https://www2.agenciatributaria.gob.es/static_files/common/internet/dep/aplicaciones/es/aeat/tike/cont/ws/RespuestaConsultaLR.xsd";
 const P_RC: &str = "sfRC";
@@ -42,6 +45,9 @@ pub struct RegistroSpec {
     /// XSD-valid.
     pub huella_previa: Option<EncadenamientoSpec>,
     pub huella: Option<String>,
+    /// The block a consulta with `MostrarSistemaInformatico=S` reads
+    /// back; the parsed type carries the whole `SistemaInformaticoType`.
+    pub sistema_informatico: Option<SistemaInformaticoAlmacenado>,
 }
 
 /// The `RegistroAnterior` block's full shape (SI.xsd).
@@ -55,9 +61,10 @@ pub struct EncadenamientoSpec {
 fn render_registro(out: &mut String, registro: &RegistroSpec) {
     // The element NAME is RespuestaConsultaLR.xsd's declaration; the
     // DatosRegistroFacturacion children are declared there too (its
-    // type is RC-local), so they carry sfRC — RegistroAnterior
-    // included; only ITS children ride the SI-named
-    // EncadenamientoFacturaAnteriorType.
+    // type is RC-local), so they carry sfRC — RegistroAnterior and
+    // SistemaInformatico included; only THEIR children ride the
+    // SI-named EncadenamientoFacturaAnteriorType and
+    // SistemaInformaticoType.
     out.push_str("<sfRC:RegistroRespuestaConsultaFactuSistemaFacturacion>");
     out.push_str("<sfRC:IDFactura>");
     tag(out, "sum1:IDEmisorFactura", &registro.id_emisor_factura);
@@ -103,6 +110,9 @@ fn render_registro(out: &mut String, registro: &RegistroSpec) {
         }
     }
     out.push_str("</sfRC:Encadenamiento>");
+    if let Some(sistema) = &registro.sistema_informatico {
+        render_sistema(out, sistema);
+    }
     if let Some(huso) = &registro.fecha_huso_gen {
         tag(out, "sfRC:FechaHoraHusoGenRegistro", huso);
     }
@@ -123,6 +133,52 @@ fn render_registro(out: &mut String, registro: &RegistroSpec) {
     }
     out.push_str("</sfRC:EstadoRegistro>");
     out.push_str("</sfRC:RegistroRespuestaConsultaFactuSistemaFacturacion>");
+}
+
+fn render_sistema(out: &mut String, sistema: &SistemaInformaticoAlmacenado) {
+    let si_no = |flag: bool| if flag { "S" } else { "N" };
+    out.push_str("<sfRC:SistemaInformatico>");
+    tag(out, "sum1:NombreRazon", &sistema.nombre_razon);
+    match &sistema.identificacion {
+        IdentificacionDestinatario::Nif(nif) => tag(out, "sum1:NIF", nif),
+        IdentificacionDestinatario::Otro(otro) => {
+            out.push_str("<sum1:IDOtro>");
+            if let Some(pais) = &otro.codigo_pais {
+                tag(out, "sum1:CodigoPais", pais);
+            }
+            tag(out, "sum1:IDType", otro.id_type.wire());
+            tag(out, "sum1:ID", &otro.id);
+            out.push_str("</sum1:IDOtro>");
+        }
+    }
+    tag(
+        out,
+        "sum1:NombreSistemaInformatico",
+        &sistema.nombre_sistema_informatico,
+    );
+    tag(
+        out,
+        "sum1:IdSistemaInformatico",
+        &sistema.id_sistema_informatico,
+    );
+    tag(out, "sum1:Version", &sistema.version);
+    tag(out, "sum1:NumeroInstalacion", &sistema.numero_instalacion);
+    tag(
+        out,
+        "sum1:TipoUsoPosibleSoloVerifactu",
+        sistema.uso_posible.wire(),
+    );
+    tag(
+        out,
+        "sum1:TipoUsoPosibleMultiOT",
+        si_no(sistema.tipo_uso_posible_multi_ot),
+    );
+    tag(
+        out,
+        "sum1:IndicadorMultiplesOT",
+        si_no(sistema.indicador_multiples_ot),
+    );
+    out.push_str("</sfRC:SistemaInformatico>");
 }
 
 #[must_use]

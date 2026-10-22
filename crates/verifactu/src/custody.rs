@@ -139,7 +139,8 @@ impl TenantVerifactu {
     /// tenant's own lens): every page merged, each answered record
     /// carrying its stored estado + the fields its huella hashes —
     /// [`RegistroConsulta::huella_verifica`](crate::RegistroConsulta::huella_verifica) proves AEAT stores
-    /// byte-what-was-sealed.
+    /// byte-what-was-sealed — and, when the filter asks, the system that
+    /// issued it ([`RegistroConsulta::sistema_informatico`](crate::RegistroConsulta::sistema_informatico)).
     ///
     /// # Errors
     /// [`EmitError`] per the consulta pipeline (fault classes included).

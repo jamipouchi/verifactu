@@ -270,7 +270,8 @@ pub struct SistemaInformaticoConfig {
 
 /// What the invoicing software can run as — the producer's declaration,
 /// `TipoUsoPosibleSoloVerifactu` on every record.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, strum::EnumIter)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub enum UsoPosible {
     /// Only VERI*FACTU (remission): `S`.
     SoloVerifactu,
@@ -286,6 +287,12 @@ impl UsoPosible {
             Self::SoloVerifactu => "S",
             Self::TambienNoVerifactu => "N",
         }
+    }
+
+    /// The inverse of [`Self::wire`] — `None` on an unknown code.
+    #[must_use]
+    pub fn parse(code: &str) -> Option<Self> {
+        parse_wire(code, Self::wire)
     }
 }
 
@@ -354,6 +361,7 @@ pub fn is_nif_iva(id: &str, fecha: &FechaExpedicion) -> bool {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, strum::EnumIter)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub enum IdOtroType {
     NifIva,
     Pasaporte,
@@ -386,13 +394,19 @@ impl IdOtroType {
 /// `CodigoPais=ES` with `01-NIFContraparte` is forbidden by the XSD —
 /// Spanish counterparts ride [`IdentificacionDestinatario::Nif`].
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct IdOtro {
     pub codigo_pais: Option<String>,
     pub id_type: IdOtroType,
     pub id: String,
 }
 
+/// SI.xsd's `NIF | IDOtro` choice (`PersonaFisicaJuridicaType`): a
+/// destinatario's identification, and the producer's in a stored
+/// [`SistemaInformatico`](consulta::SistemaInformaticoAlmacenado)
+/// block, whose type repeats the same choice.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub enum IdentificacionDestinatario {
     Nif(String),
     Otro(IdOtro),

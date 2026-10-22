@@ -15,6 +15,10 @@
 //! huella input hashes — [`RegistroConsulta::huella_verifica`]
 //! recomputes it, so a product can prove AEAT stores byte-what-it-sealed
 //! (and audit the whole stored chain page by page).
+//!
+//! Asked for it, each record also carries the `SistemaInformatico` that
+//! issued it ([`RegistroConsulta::sistema_informatico`]): under one NIF,
+//! the records of another system or installation are not this one's.
 
 use std::sync::Arc;
 
@@ -24,7 +28,9 @@ use crate::domain::chain::{huella_alta_montos, FechaExpedicion, TipoFactura};
 use crate::domain::money::Money;
 use crate::fiscal::transport::{TransportFailure, TransportOutcome, VerifactuTransport};
 use crate::fiscal::xml::{self, tag, Tree};
-use crate::fiscal::{EmitError, Obligado};
+use crate::fiscal::{
+    EmitError, IdOtro, IdOtroType, IdentificacionDestinatario, Obligado, UsoPosible,
+};
 
 const NS_CONSULTA: &str = "https://www2.agenciatributaria.gob.es/static_files/common/internet/dep/aplicaciones/es/aeat/tike/cont/ws/ConsultaLR.xsd";
 const P_C: &str = "sfC";
@@ -53,15 +59,31 @@ impl Mes {
     }
 }
 
-/// The query window + narrowing keys (`LRFiltroRegFacturacionType`).
-/// The period is the obligado's `PeriodoImputacion` — where the record
-/// LANDS, which for an emitted factura is the expedition month.
+/// The query window + narrowing keys (`LRFiltroRegFacturacionType`),
+/// and what the answer should carry (`DatosAdicionalesRespuestaType`).
+/// The period is the record's `PeriodoImputacion`, where it lands: the
+/// month of its `FechaOperacion`, else of its `FechaExpedicionFactura`
+/// (SW description §6.4). Live-observed 2026-10-22: a factura issued in
+/// October for an operation of 1 January answered `SinDatos` under
+/// October.
+///
+/// `FiltroConsulta/SistemaInformatico` is not offered: AEAT matches it
+/// against the systems it knows and refuses a filter that matches
+/// several (AEAT 1285), so read each record's system back instead
+/// ([`mostrar_sistema_informatico`](method@Self::mostrar_sistema_informatico)).
 #[derive(Clone, Copy, Debug)]
 pub struct ConsultaFilter<'a> {
     pub ejercicio: u16,
     pub mes: Mes,
     pub num_serie: Option<&'a str>,
     pub ref_externa: Option<&'a str>,
+    /// `DatosAdicionalesRespuesta/MostrarSistemaInformatico=S`: AEAT
+    /// answers each record's stored `SistemaInformatico`
+    /// ([`RegistroConsulta::sistema_informatico`]), at the cost of a
+    /// slower answer (ConsultaLR.xsd). A consulta by Destinatario must
+    /// leave it unset (AEAT 1272); the obligado and apoderado lenses,
+    /// the only ones this crate opens, admit it.
+    pub mostrar_sistema_informatico: bool,
 }
 
 impl<'a> ConsultaFilter<'a> {
@@ -72,6 +94,7 @@ impl<'a> ConsultaFilter<'a> {
             mes,
             num_serie: None,
             ref_externa: None,
+            mostrar_sistema_informatico: false,
         }
     }
 
@@ -85,6 +108,14 @@ impl<'a> ConsultaFilter<'a> {
     #[must_use]
     pub fn ref_externa(mut self, ref_externa: &'a str) -> Self {
         self.ref_externa = Some(ref_externa);
+        self
+    }
+
+    /// Asks AEAT for each record's stored `SistemaInformatico`: sets
+    /// the `mostrar_sistema_informatico` field.
+    #[must_use]
+    pub fn mostrar_sistema_informatico(mut self) -> Self {
+        self.mostrar_sistema_informatico = true;
         self
     }
 }
@@ -185,6 +216,44 @@ pub struct RegistroConsulta {
     /// `Huella`.
     pub huella_previa: Option<String>,
     pub huella: Option<String>,
+    /// The system that issued the record, as AEAT stores it; `None`
+    /// unless the consulta asked for it
+    /// ([`ConsultaFilter::mostrar_sistema_informatico`]) and AEAT
+    /// answered it.
+    ///
+    /// The producer's identification, `IdSistemaInformatico` and
+    /// `NumeroInstalacion` identify an installation; `Version` changes
+    /// across upgrades. Compare those three, not `Version`, to tell an
+    /// installation's own records from another system's under the same
+    /// NIF.
+    pub sistema_informatico: Option<SistemaInformaticoAlmacenado>,
+}
+
+/// A record's stored `SistemaInformatico` block
+/// (`SistemaInformaticoType`, every child required).
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct SistemaInformaticoAlmacenado {
+    /// The producer of the software (Validaciones §3.1.5), not the
+    /// obligado.
+    pub nombre_razon: String,
+    /// The producer's `NIF | IDOtro`: the type repeats SI.xsd's
+    /// `PersonaFisicaJuridicaType` choice, so it reads as a
+    /// destinatario's does.
+    pub identificacion: IdentificacionDestinatario,
+    pub nombre_sistema_informatico: String,
+    pub id_sistema_informatico: String,
+    pub version: String,
+    pub numero_instalacion: String,
+    /// `TipoUsoPosibleSoloVerifactu`.
+    pub uso_posible: UsoPosible,
+    /// `TipoUsoPosibleMultiOT`, `S` as `true`: the installation can
+    /// serve several obligados tributarios. This crate emits `N`, one
+    /// obligado per installation.
+    pub tipo_uso_posible_multi_ot: bool,
+    /// `IndicadorMultiplesOT`, `S` as `true`: the installation serves
+    /// several obligados tributarios. This crate emits `N`.
+    pub indicador_multiples_ot: bool,
 }
 
 fn parse_importe(text: &str) -> Option<Money> {
@@ -346,6 +415,13 @@ pub(crate) fn consulta_document(request: &ConsultaRequest<'_>) -> Result<String,
         out.push_str("</sfC:ClavePaginacion>");
     }
     out.push_str("</sfC:FiltroConsulta>");
+    if request.filtro.mostrar_sistema_informatico {
+        // Declared in ConsultaLR.xsd down to the flag (only its simple
+        // type is SI's), so every element carries sfC.
+        out.push_str("<sfC:DatosAdicionalesRespuesta>");
+        tag(&mut out, "sfC:MostrarSistemaInformatico", "S");
+        out.push_str("</sfC:DatosAdicionalesRespuesta>");
+    }
     out.push_str("</sfC:ConsultaFactuSistemaFacturacion>");
     Ok(out)
 }
@@ -489,7 +565,67 @@ fn registro_of_tree(node: &Tree) -> Result<RegistroConsulta, String> {
                 .and_then(|anterior| optional_text(anterior, "Huella"))
         }),
         huella: optional_text(datos, "Huella"),
+        sistema_informatico: sistema_of_tree(datos)?,
     })
+}
+
+/// The stored `SistemaInformatico` (`SistemaInformaticoType`): every
+/// child is required, so a block missing one is an `Err`. The empty
+/// element reads as absent, as [`optional_text`] reads an empty value.
+fn sistema_of_tree(datos: &Tree) -> Result<Option<SistemaInformaticoAlmacenado>, String> {
+    let Some(node) = datos.child("SistemaInformatico") else {
+        return Ok(None);
+    };
+    if node.children.is_empty() && node.text.trim().is_empty() {
+        return Ok(None);
+    }
+    let required = |local: &str| {
+        node.child_text(local)
+            .ok_or_else(|| format!("SistemaInformatico without {local}"))
+    };
+    let si_no = |local: &str| match required(local)?.as_str() {
+        "S" => Ok(true),
+        "N" => Ok(false),
+        other => Err(format!(
+            "off-vocabulary SistemaInformatico/{local}: {other}"
+        )),
+    };
+    let identificacion = match (node.child("NIF"), node.child("IDOtro")) {
+        (Some(nif), None) => IdentificacionDestinatario::Nif(nif.text.clone()),
+        (None, Some(otro)) => {
+            let id_type = otro
+                .child_text("IDType")
+                .ok_or("SistemaInformatico/IDOtro without IDType")?;
+            IdentificacionDestinatario::Otro(IdOtro {
+                codigo_pais: optional_text(otro, "CodigoPais"),
+                id_type: IdOtroType::parse(&id_type).ok_or_else(|| {
+                    format!("off-vocabulary SistemaInformatico/IDOtro/IDType: {id_type}")
+                })?,
+                id: otro
+                    .child_text("ID")
+                    .ok_or("SistemaInformatico/IDOtro without ID")?,
+            })
+        }
+        _ => {
+            return Err(String::from(
+                "SistemaInformatico carries neither or both of NIF and IDOtro",
+            ))
+        }
+    };
+    let uso_posible = required("TipoUsoPosibleSoloVerifactu")?;
+    Ok(Some(SistemaInformaticoAlmacenado {
+        nombre_razon: required("NombreRazon")?,
+        identificacion,
+        nombre_sistema_informatico: required("NombreSistemaInformatico")?,
+        id_sistema_informatico: required("IdSistemaInformatico")?,
+        version: required("Version")?,
+        numero_instalacion: required("NumeroInstalacion")?,
+        uso_posible: UsoPosible::parse(&uso_posible).ok_or_else(|| {
+            format!("off-vocabulary SistemaInformatico/TipoUsoPosibleSoloVerifactu: {uso_posible}")
+        })?,
+        tipo_uso_posible_multi_ot: si_no("TipoUsoPosibleMultiOT")?,
+        indicador_multiples_ot: si_no("IndicadorMultiplesOT")?,
+    }))
 }
 
 // ---- the wire ----------------------------------------------------------
@@ -580,10 +716,11 @@ mod tests {
     use super::{
         consulta_document, consulta_response_document, parse_consulta, ConsultaFilter,
         ConsultaRequest, ConsultaSpec, EstadoAlmacenado, Mes, RegistroSpec, ResultadoConsulta,
+        SistemaInformaticoAlmacenado,
     };
     use crate::domain::chain::huella_alta_montos;
     use crate::domain::money::Money;
-    use crate::fiscal::Obligado;
+    use crate::fiscal::{IdOtro, IdOtroType, IdentificacionDestinatario, Obligado, UsoPosible};
 
     fn obligado() -> Obligado {
         Obligado {
@@ -677,6 +814,7 @@ mod tests {
                 huella_previa: None,
                 // None renders the empty element `<sfRC:Huella/>`.
                 huella: None,
+                sistema_informatico: None,
             }],
         };
         let answer =
@@ -735,6 +873,7 @@ mod tests {
                 huella: Some(String::from(
                     "3C464DAF61ACB827C65FDA19F352A4E3BDC2C640E9E9FC4CC058073F38F12F60",
                 )),
+                sistema_informatico: None,
             }],
         };
         let answer =
@@ -780,10 +919,222 @@ mod tests {
                 huella: Some(String::from(
                     "3C464DAF61ACB827C65FDA19F352A4E3BDC2C640E9E9FC4CC058073F38F12F60",
                 )),
+                sistema_informatico: None,
             }],
         };
         let answer =
             parse_consulta(&consulta_response_document(&spec)).expect("the respuesta parses");
         assert_eq!(answer.registros[0].huella_verifica(), Some(false));
+    }
+
+    /// `MostrarSistemaInformatico=S` rides `DatosAdicionalesRespuesta`,
+    /// after `FiltroConsulta`, exactly when the filter asks for it.
+    #[test]
+    fn the_sistema_flag_renders_exactly_when_set() {
+        let obligado = obligado();
+        let render = |filtro: &ConsultaFilter<'_>| {
+            consulta_document(&ConsultaRequest {
+                obligado: &obligado,
+                apoderado: false,
+                filtro,
+                clave_paginacion: None,
+            })
+            .expect("the request renders")
+        };
+        let filtro = ConsultaFilter::new(2026, Mes::try_new(10).expect("octubre"));
+        assert!(!filtro.mostrar_sistema_informatico, "new leaves it unset");
+        let document = render(&filtro);
+        assert!(
+            !document.contains("DatosAdicionalesRespuesta"),
+            "{document}"
+        );
+        assert!(
+            !document.contains("MostrarSistemaInformatico"),
+            "{document}"
+        );
+
+        let document = render(&filtro.mostrar_sistema_informatico());
+        assert!(
+            document.ends_with(
+                "</sfC:FiltroConsulta><sfC:DatosAdicionalesRespuesta>\
+                 <sfC:MostrarSistemaInformatico>S</sfC:MostrarSistemaInformatico>\
+                 </sfC:DatosAdicionalesRespuesta></sfC:ConsultaFactuSistemaFacturacion>"
+            ),
+            "{document}"
+        );
+    }
+
+    fn sistema(identificacion: IdentificacionDestinatario) -> SistemaInformaticoAlmacenado {
+        SistemaInformaticoAlmacenado {
+            nombre_razon: String::from("SOFTWARE & FACTURAS SL"),
+            identificacion,
+            nombre_sistema_informatico: String::from("mi-facturacion"),
+            id_sistema_informatico: String::from("MF"),
+            version: String::from("2.3.1"),
+            numero_instalacion: String::from("000042"),
+            uso_posible: UsoPosible::TambienNoVerifactu,
+            tipo_uso_posible_multi_ot: false,
+            indicador_multiples_ot: false,
+        }
+    }
+
+    fn producer_nif() -> IdentificacionDestinatario {
+        IdentificacionDestinatario::Nif(String::from("B87654321"))
+    }
+
+    fn registro(
+        num_serie: &str,
+        sistema_informatico: Option<SistemaInformaticoAlmacenado>,
+    ) -> RegistroSpec {
+        RegistroSpec {
+            id_emisor_factura: String::from("12345678Z"),
+            num_serie_factura: num_serie.to_owned(),
+            fecha_expedicion_factura: String::from("05-10-2026"),
+            estado: EstadoAlmacenado::Correcto,
+            timestamp_ultima_modificacion: String::from("2026-10-05T12:00:00+02:00"),
+            codigo_error: None,
+            descripcion_error: None,
+            tipo_factura: None,
+            cuota_total: None,
+            importe_total: None,
+            fecha_huso_gen: None,
+            huella_previa: None,
+            huella: None,
+            sistema_informatico,
+        }
+    }
+
+    fn answer_document(registros: Vec<RegistroSpec>) -> String {
+        consulta_response_document(&ConsultaSpec {
+            obligado_nombre: String::from("ANA RUIZ PEREZ"),
+            obligado_nif: String::from("12345678Z"),
+            apoderado: false,
+            ejercicio: 2026,
+            mes: Mes::try_new(10).expect("octubre"),
+            resultado: ResultadoConsulta::ConDatos,
+            paginacion_pendiente: false,
+            clave_paginacion: None,
+            registros,
+        })
+    }
+
+    /// The stored block reads back equal through the real read edge,
+    /// for a NIF and an `IDOtro` producer, with and without `CodigoPais`,
+    /// across both spellings of every S/N; a record answered without
+    /// it reads `None`.
+    #[test]
+    fn the_stored_sistema_informatico_round_trips() {
+        let nif = sistema(producer_nif());
+        let otro = SistemaInformaticoAlmacenado {
+            uso_posible: UsoPosible::SoloVerifactu,
+            tipo_uso_posible_multi_ot: true,
+            indicador_multiples_ot: true,
+            ..sistema(IdentificacionDestinatario::Otro(IdOtro {
+                codigo_pais: Some(String::from("FR")),
+                id_type: IdOtroType::IdPaisResidencia,
+                id: String::from("FR-0042"),
+            }))
+        };
+        let nif_iva = sistema(IdentificacionDestinatario::Otro(IdOtro {
+            codigo_pais: None,
+            id_type: IdOtroType::NifIva,
+            id: String::from("DE123456789"),
+        }));
+        let answer = parse_consulta(&answer_document(vec![
+            registro("T00000001", Some(nif.clone())),
+            registro("T00000002", Some(otro.clone())),
+            registro("T00000003", Some(nif_iva.clone())),
+            registro("T00000004", None),
+        ]))
+        .expect("the respuesta parses");
+        let read: Vec<_> = answer
+            .registros
+            .into_iter()
+            .map(|registro| registro.sistema_informatico)
+            .collect();
+        assert_eq!(read, vec![Some(nif), Some(otro), Some(nif_iva), None]);
+    }
+
+    /// Every `SistemaInformaticoType` child is required: a block missing
+    /// one, carrying both or neither identification, or holding an
+    /// off-vocabulary code refuses the answer. The empty element is
+    /// admitted as absent.
+    #[test]
+    fn a_partial_sistema_informatico_block_is_refused() {
+        let document = answer_document(vec![registro("T00000001", Some(sistema(producer_nif())))]);
+        let block = document
+            .find("<sfRC:SistemaInformatico>")
+            .expect("the block renders");
+        let without = |document: &str, child: &str| {
+            let (open, close) = (format!("<sum1:{child}>"), format!("</sum1:{child}>"));
+            let start = block + document[block..].find(&open).expect("the child renders");
+            let end = start + document[start..].find(&close).expect("closed") + close.len();
+            let mut cut = document.to_owned();
+            cut.replace_range(start..end, "");
+            cut
+        };
+        for child in [
+            "NombreRazon",
+            "NIF",
+            "NombreSistemaInformatico",
+            "IdSistemaInformatico",
+            "Version",
+            "NumeroInstalacion",
+            "TipoUsoPosibleSoloVerifactu",
+            "TipoUsoPosibleMultiOT",
+            "IndicadorMultiplesOT",
+        ] {
+            let error =
+                parse_consulta(&without(&document, child)).expect_err("a missing child refuses");
+            assert!(error.contains(child), "{child}: {error}");
+        }
+
+        let otro = answer_document(vec![registro(
+            "T00000001",
+            Some(sistema(IdentificacionDestinatario::Otro(IdOtro {
+                codigo_pais: Some(String::from("FR")),
+                id_type: IdOtroType::Pasaporte,
+                id: String::from("12AB34567"),
+            }))),
+        )]);
+        for child in ["IDType", "ID"] {
+            let error = parse_consulta(&without(&otro, child)).expect_err("IDOtro is incomplete");
+            assert!(error.contains(child), "{child}: {error}");
+        }
+        let error = parse_consulta(&otro.replace(
+            "<sum1:IDType>03</sum1:IDType>",
+            "<sum1:IDType>01</sum1:IDType>",
+        ))
+        .expect_err("01 is not a PersonaFisicaJuridicaIDTypeType");
+        assert!(error.contains("IDType"), "{error}");
+
+        let both = document.replace(
+            "<sum1:NIF>B87654321</sum1:NIF>",
+            "<sum1:NIF>B87654321</sum1:NIF><sum1:IDOtro><sum1:IDType>02</sum1:IDType>\
+             <sum1:ID>DE123456789</sum1:ID></sum1:IDOtro>",
+        );
+        assert!(
+            parse_consulta(&both).is_err(),
+            "NIF and IDOtro are a choice"
+        );
+        for (child, wire) in [
+            ("TipoUsoPosibleSoloVerifactu", "N"),
+            ("TipoUsoPosibleMultiOT", "N"),
+            ("IndicadorMultiplesOT", "N"),
+        ] {
+            let off = document.replace(
+                &format!("<sum1:{child}>{wire}</sum1:{child}>"),
+                &format!("<sum1:{child}>X</sum1:{child}>"),
+            );
+            let error = parse_consulta(&off).expect_err("S/N is closed");
+            assert!(error.contains(child), "{child}: {error}");
+        }
+
+        let close = "</sfRC:SistemaInformatico>";
+        let end = document.find(close).expect("closed") + close.len();
+        let mut empty = document.clone();
+        empty.replace_range(block..end, "<sfRC:SistemaInformatico/>");
+        let answer = parse_consulta(&empty).expect("the empty element is admitted");
+        assert_eq!(answer.registros[0].sistema_informatico, None);
     }
 }

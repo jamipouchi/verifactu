@@ -28,7 +28,7 @@ fn xsd_enumerations(simple_type: &str) -> Vec<String> {
 
 #[test]
 fn emission_vocabularies_wire_spellings_are_the_xsd_enumerations() {
-    let cases: [(&str, Vec<&str>); 6] = [
+    let cases: [(&str, Vec<&str>); 7] = [
         (
             "ImpuestoType",
             verifactu::Impuesto::iter()
@@ -65,6 +65,13 @@ fn emission_vocabularies_wire_spellings_are_the_xsd_enumerations() {
                 .map(verifactu::IdOtroType::wire)
                 .collect(),
         ),
+        // TipoUsoPosibleSoloVerifactu's type.
+        (
+            "SiNoType",
+            verifactu::UsoPosible::iter()
+                .map(verifactu::UsoPosible::wire)
+                .collect(),
+        ),
     ];
     for (simple_type, wires) in cases {
         let mut wires: Vec<String> = wires.into_iter().map(str::to_owned).collect();
@@ -96,7 +103,9 @@ fn the_codigo_pais_gate_is_the_xsd_country_enumeration() {
 /// — the table a JSON/CLI consumer leans on instead of hand-mirroring.
 #[test]
 fn vocabularies_parse_back_their_wire_spellings() {
-    use verifactu::{CalificacionOperacion, ClaveRegimen, IdOtroType, Impuesto, OperacionExenta};
+    use verifactu::{
+        CalificacionOperacion, ClaveRegimen, IdOtroType, Impuesto, OperacionExenta, UsoPosible,
+    };
 
     for clave in ClaveRegimen::iter() {
         assert_eq!(ClaveRegimen::parse(clave.wire()), Some(clave));
@@ -115,6 +124,9 @@ fn vocabularies_parse_back_their_wire_spellings() {
     }
     for id_type in IdOtroType::iter() {
         assert_eq!(IdOtroType::parse(id_type.wire()), Some(id_type));
+    }
+    for uso in UsoPosible::iter() {
+        assert_eq!(UsoPosible::parse(uso.wire()), Some(uso));
     }
     for (tipo, code) in [
         (verifactu::TipoRectificativa::Sustitutiva, "S"),
@@ -141,4 +153,5 @@ fn vocabularies_parse_back_their_wire_spellings() {
     );
     assert_eq!(Impuesto::parse("04"), None);
     assert_eq!(CalificacionOperacion::parse("S3"), None);
+    assert_eq!(UsoPosible::parse("s"), None, "SiNoType is uppercase");
 }

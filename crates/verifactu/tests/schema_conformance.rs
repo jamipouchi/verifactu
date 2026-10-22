@@ -28,7 +28,8 @@ use verifactu::{
     CalificacionOperacion, ChainKind, ClaveRegimen, ConsultaFilter, DetalleDesglose,
     EstadoAlmacenado, FacturaId, FechaExpedicion, FechaHuso, IDDestinatario, IdOtro, IdOtroType,
     IdentificacionDestinatario, ImporteRectificacion, Impuesto, Mes, Modality, Money, Obligado,
-    OperacionExenta, Predecessor, Series, TipoFactura, TipoRectificativa,
+    OperacionExenta, Predecessor, Series, SistemaInformaticoAlmacenado, TipoFactura,
+    TipoRectificativa, UsoPosible,
 };
 
 // ---- the oracle --------------------------------------------------------
@@ -352,6 +353,62 @@ fn destinatario() -> impl Strategy<Value = IDDestinatario> {
         nombre_razon,
         identificacion,
     })
+}
+
+/// A stored `SistemaInformatico` as the fake answers it: a NIF or an
+/// `IDOtro` producer, every child present.
+fn sistema_almacenado() -> impl Strategy<Value = SistemaInformaticoAlmacenado> {
+    let identificacion = prop_oneof![
+        "[0-9]{8}[A-Z]".prop_map(IdentificacionDestinatario::Nif),
+        (
+            proptest::option::of(proptest::sample::select(
+                verifactu::engine::xml::CODIGOS_PAIS.to_vec()
+            )),
+            pick::<IdOtroType>(),
+            "[A-Z0-9]{1,20}",
+        )
+            .prop_map(|(codigo_pais, id_type, id)| {
+                IdentificacionDestinatario::Otro(IdOtro {
+                    codigo_pais: codigo_pais.map(str::to_owned),
+                    id_type,
+                    id,
+                })
+            }),
+    ];
+    (
+        "[A-Za-z0-9 &<>.,-]{1,120}",
+        identificacion,
+        "[A-Za-z0-9 -]{1,30}",
+        "[A-Z0-9]{2}",
+        "[0-9]{1,3}(\\.[0-9]{1,3}){0,2}",
+        "[A-Za-z0-9-]{1,100}",
+        pick::<UsoPosible>(),
+        proptest::bool::ANY,
+        proptest::bool::ANY,
+    )
+        .prop_map(
+            |(
+                nombre_razon,
+                identificacion,
+                nombre_sistema_informatico,
+                id_sistema_informatico,
+                version,
+                numero_instalacion,
+                uso_posible,
+                tipo_uso_posible_multi_ot,
+                indicador_multiples_ot,
+            )| SistemaInformaticoAlmacenado {
+                nombre_razon,
+                identificacion,
+                nombre_sistema_informatico,
+                id_sistema_informatico,
+                version,
+                numero_instalacion,
+                uso_posible,
+                tipo_uso_posible_multi_ot,
+                indicador_multiples_ot,
+            },
+        )
 }
 
 fn fecha() -> impl Strategy<Value = FechaExpedicion> {
@@ -689,6 +746,7 @@ proptest! {
         num_serie in proptest::option::of(num_serie()),
         ref_externa in proptest::option::of(text(60)),
         clave in proptest::option::of((nif(), num_serie(), "[0-9]{2}-[0-9]{2}-[0-9]{4}")),
+        mostrar_sistema_informatico in proptest::bool::ANY,
     ) {
         let transport = Arc::new(FakeVerifactuTransport::new());
         let Ok(emitter) = VerifactuEmitter::new(
@@ -704,6 +762,7 @@ proptest! {
         let mut filtro = ConsultaFilter::new(ejercicio, Mes::try_new(mes).expect("1..=12"));
         filtro.num_serie = num_serie.as_deref();
         filtro.ref_externa = ref_externa.as_deref();
+        filtro.mostrar_sistema_informatico = mostrar_sistema_informatico;
         let clave = clave.map(|(id_emisor_factura, num_serie_factura, fecha_expedicion_factura)| {
             ClavePaginacion { id_emisor_factura, num_serie_factura, fecha_expedicion_factura }
         });
@@ -796,13 +855,14 @@ proptest! {
                 proptest::option::of((pick::<TipoFactura>(), money(1_000_000), money(1_000_000))),
                 proptest::option::of("[0-9A-F]{64}"),
                 proptest::option::of("[0-9A-F]{64}"),
+                proptest::option::of(sistema_almacenado()),
             ),
             0..=3,
         ),
     ) {
         let registros = registros
             .into_iter()
-            .map(|(num_serie_factura, estado, error, montos, previa, huella)| RegistroSpec {
+            .map(|(num_serie_factura, estado, error, montos, previa, huella, sistema)| RegistroSpec {
                 id_emisor_factura: String::from("12345678Z"),
                 num_serie_factura,
                 fecha_expedicion_factura: String::from("05-10-2026"),
@@ -820,6 +880,7 @@ proptest! {
                     huella,
                 }),
                 huella,
+                sistema_informatico: sistema,
             })
             .collect();
         let document = consulta_response_document(&ConsultaSpec {
