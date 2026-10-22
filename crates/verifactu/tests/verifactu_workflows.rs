@@ -13,6 +13,7 @@ use verifactu::FiscalSigner;
 use verifactu::Money;
 use verifactu::Series;
 use verifactu::Timestamp;
+use verifactu::TransportFailure;
 use verifactu::{ChainKind, FechaExpedicion, FechaHuso, TipoFactura};
 use verifactu::{DetalleDesglose, EmitError, Modality, Obligado};
 
@@ -218,11 +219,32 @@ fn emission_error_codes_are_stable_and_namespaced() {
             ErrorClass::Bug,
         ),
         (
-            EmitError::Transport {
+            EmitError::Transport(TransportFailure::Wire {
                 detail: String::from("x"),
-            },
+            }),
             "fiscal.transport",
             ErrorClass::Transient,
+        ),
+        (
+            EmitError::Transport(TransportFailure::Unreadable {
+                detail: String::from("x"),
+            }),
+            "fiscal.transport",
+            ErrorClass::Transient,
+        ),
+        (
+            // A certificate AEAT's door does not accept, or an endpoint
+            // that is not AEAT's: no retry heals either.
+            EmitError::Transport(TransportFailure::Refused { status: 302 }),
+            "fiscal.transport.refused",
+            ErrorClass::OperatorAction,
+        ),
+        (
+            EmitError::Transport(TransportFailure::StandIn {
+                mark: String::from("x-stand-in"),
+            }),
+            "fiscal.transport.stand-in",
+            ErrorClass::OperatorAction,
         ),
         (
             EmitError::FaultServer {

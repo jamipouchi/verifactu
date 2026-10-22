@@ -501,8 +501,10 @@ pub enum EmitError {
     /// Fail-closed: emission is impossible, never a silent no-op.
     #[error("fiscal emitter has no transport configured")]
     NotConfigured,
-    #[error("fiscal transport failure: {detail}")]
-    Transport { detail: String },
+    /// The exchange yielded no AEAT answer to read; the cause sets the
+    /// class.
+    #[error("fiscal transport failure: {0}")]
+    Transport(TransportFailure),
     #[error("fiscal AEAT server fault: {faultstring}")]
     FaultServer { faultstring: String },
     #[error("fiscal AEAT client fault: {faultstring}")]
@@ -518,7 +520,13 @@ impl EmitError {
     pub fn code(&self) -> &'static str {
         match self {
             Self::NotConfigured => "fiscal.not-configured",
-            Self::Transport { .. } => "fiscal.transport",
+            Self::Transport(failure) => match failure {
+                TransportFailure::Wire { .. } | TransportFailure::Unreadable { .. } => {
+                    "fiscal.transport"
+                }
+                TransportFailure::Refused { .. } => "fiscal.transport.refused",
+                TransportFailure::StandIn { .. } => "fiscal.transport.stand-in",
+            },
             Self::FaultServer { .. } => "fiscal.fault.server",
             Self::FaultClient { .. } => "fiscal.fault.client",
             Self::Signing(signer_error) => match signer_error {
@@ -532,8 +540,17 @@ impl EmitError {
     #[must_use]
     pub fn class(&self) -> ErrorClass {
         match self {
-            Self::Transport { .. } | Self::FaultServer { .. } => ErrorClass::Transient,
-            Self::FaultClient { .. } | Self::Signing(_) => ErrorClass::OperatorAction,
+            Self::Transport(
+                TransportFailure::Wire { .. } | TransportFailure::Unreadable { .. },
+            )
+            | Self::FaultServer { .. } => ErrorClass::Transient,
+            // A refused certificate or a stand-in's answer never heals on
+            // retry: the operator fixes the certificate or the endpoint.
+            Self::Transport(
+                TransportFailure::Refused { .. } | TransportFailure::StandIn { .. },
+            )
+            | Self::FaultClient { .. }
+            | Self::Signing(_) => ErrorClass::OperatorAction,
             Self::InvalidRecord { .. } => ErrorClass::InvalidInput,
             Self::NotConfigured => ErrorClass::Bug,
         }
@@ -554,12 +571,12 @@ impl From<SignerError> for EmitError {
     }
 }
 
-/// A wire-leg failure is always the `Transient` class.
+/// The cause rides along: [`EmitError::class`] retries a wire failure
+/// or an unreadable answer and hands a refusal or a stand-in's answer
+/// to the operator.
 impl From<TransportFailure> for EmitError {
     fn from(failure: TransportFailure) -> Self {
-        Self::Transport {
-            detail: failure.detail,
-        }
+        Self::Transport(failure)
     }
 }
 
@@ -747,9 +764,10 @@ impl VerifactuEmitter {
         )?;
         match transport.send(&xml::soap_envelope(&body)).await? {
             TransportOutcome::Fault(fault) => Err(fault.into()),
-            TransportOutcome::Consulta(_) => Err(EmitError::Transport {
+            TransportOutcome::Consulta(_) => Err(TransportFailure::Unreadable {
                 detail: String::from("AEAT answered a consulta respuesta to a submission"),
-            }),
+            }
+            .into()),
             TransportOutcome::Response(respuesta) => {
                 let disposition = response::classify_response(&respuesta);
                 Ok(Emission {

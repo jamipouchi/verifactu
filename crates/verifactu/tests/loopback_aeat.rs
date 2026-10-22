@@ -1,7 +1,8 @@
 //! The production transport against an owned loopback AEAT: the
 //! refused exchange is an HTTP 302 to the sede error page — the
-//! transport must name that door, never a generic parse failure — and a
-//! stand-in's marked answer is never read as AEAT's.
+//! transport must type that refusal, never a generic parse failure, and
+//! carry nothing the door sent beside it — and a stand-in's marked
+//! answer is never read as AEAT's.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -13,7 +14,7 @@ use verifactu::engine::xml::{self, CabeceraRemision};
 use verifactu::engine::EmissionContext;
 use verifactu::engine::SistemaInformaticoConfig;
 use verifactu::VerifactuTransport as _;
-use verifactu::{DetalleDesglose, Obligado};
+use verifactu::{DetalleDesglose, EmitError, ErrorClass, Obligado, TransportFailure};
 
 const EMISSION_INSTANT: u64 = 1_738_589_400;
 
@@ -88,7 +89,7 @@ fn envelope_for_primer_alta() -> String {
 async fn aeat_loopback(
     status: StatusCode,
     body: String,
-    extra_header: Option<(&'static str, &'static str)>,
+    extra_headers: &'static [(&'static str, &'static str)],
 ) -> (
     String,
     rustls::RootCertStore,
@@ -97,26 +98,35 @@ async fn aeat_loopback(
 ) {
     let served: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
     let counter = Arc::clone(&served);
-    let router = axum::Router::new().route(
-        "/wlpl/TIKE-CONT/ws/SistemaFacturacion/VerifactuSOAP",
-        axum::routing::post(move || {
-            let counter = Arc::clone(&counter);
-            let body = body.clone();
+    // Any other path is counted too: a client that followed a
+    // redirect would land here, never off the loopback.
+    let stray = Arc::clone(&served);
+    let router = axum::Router::new()
+        .route(
+            "/wlpl/TIKE-CONT/ws/SistemaFacturacion/VerifactuSOAP",
+            axum::routing::post(move || {
+                let counter = Arc::clone(&counter);
+                let body = body.clone();
+                async move {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    let answer = axum::response::Response::builder()
+                        .status(status)
+                        .header(axum::http::header::CONTENT_TYPE, "text/xml; charset=utf-8");
+                    extra_headers
+                        .iter()
+                        .fold(answer, |answer, &(name, value)| answer.header(name, value))
+                        .body(axum::body::Body::from(body))
+                        .expect("the loopback answer builds")
+                }
+            }),
+        )
+        .fallback(move || {
+            let stray = Arc::clone(&stray);
             async move {
-                counter.fetch_add(1, Ordering::SeqCst);
-                let answer = axum::response::Response::builder()
-                    .status(status)
-                    .header(axum::http::header::CONTENT_TYPE, "text/xml; charset=utf-8");
-                let answer = match extra_header {
-                    Some((name, value)) => answer.header(name, value),
-                    None => answer,
-                };
-                answer
-                    .body(axum::body::Body::from(body))
-                    .expect("the loopback answer builds")
+                stray.fetch_add(1, Ordering::SeqCst);
+                StatusCode::NOT_FOUND
             }
-        }),
-    );
+        });
     let (address, roots, handle) = test_util::serve_tls_client_certs(router).await;
     let identity = verifactu::engine::p12::ClientIdentity::new(handle.chain(), handle.key());
     (
@@ -127,27 +137,125 @@ async fn aeat_loopback(
     )
 }
 
-#[tokio::test]
-async fn a_redirect_answer_is_the_named_certificate_refusal() {
-    let (endpoint, roots, identity, _) =
-        aeat_loopback(StatusCode::FOUND, String::new(), None).await;
-    let transport =
-        verifactu::engine::HttpVerifactuTransport::new(&endpoint, Duration::from_secs(10))
-            .expect("endpoint parses")
-            .with_roots(roots)
-            .with_client_identity(identity)
-            .expect("the minted identity is accepted");
+/// The certificate gate's redirect: the sede error page, with the gate's
+/// session in the Location's query. The Location is relative, so a
+/// client that followed it would hit the loopback, counted; the page
+/// links AEAT's host. The cookie stands for any other header the door
+/// sends beside the status.
+const GATE_LOCATION: &str =
+    "/wlpl/SSII-FACT/ws/erro4011?jsessionid=SECRETSESSION&ticket=SECRETTICKET";
+const GATE_HEADERS: &[(&str, &str)] = &[
+    ("location", GATE_LOCATION),
+    (
+        "set-cookie",
+        "JSESSIONID=SECRETCOOKIE; Path=/; Secure; HttpOnly",
+    ),
+];
 
-    let failure = transport
+/// A refusal is typed by its status alone: the Location's session, the
+/// cookie and the page the door sends beside it never reach the
+/// failure, nor the error it becomes.
+#[tokio::test]
+async fn a_refused_exchange_is_typed_and_never_carries_the_doors_session() {
+    for status in [
+        StatusCode::FOUND,
+        StatusCode::MOVED_PERMANENTLY,
+        StatusCode::UNAUTHORIZED,
+        StatusCode::FORBIDDEN,
+    ] {
+        let page = format!(
+            "<html><body><a href=\"https://www1.agenciatributaria.gob.es{GATE_LOCATION}\">\
+             erro4011</a></body></html>"
+        );
+        let (endpoint, roots, identity, served) = aeat_loopback(status, page, GATE_HEADERS).await;
+
+        let (transport, recorder) = transport_to(&endpoint, roots, &identity).recording();
+        let failure = transport
+            .send(&envelope_for_primer_alta())
+            .await
+            .expect_err("the gate refuses");
+        assert_eq!(
+            failure,
+            TransportFailure::Refused {
+                status: status.as_u16()
+            }
+        );
+        assert_eq!(
+            served.load(Ordering::SeqCst),
+            1,
+            "one exchange: neither retried nor followed"
+        );
+        let shown = failure.to_string();
+        assert!(
+            shown.contains(&format!("HTTP {}", status.as_u16()))
+                && shown.contains("certificate was not accepted"),
+            "{shown}"
+        );
+
+        let error = EmitError::from(failure.clone());
+        for text in [
+            shown,
+            format!("{failure:?}"),
+            error.to_string(),
+            format!("{error:?}"),
+        ] {
+            for leak in ["SECRET", "jsessionid", "erro4011", "agenciatributaria"] {
+                assert!(!text.contains(leak), "{leak} leaked into {text}");
+            }
+        }
+        // The opt-in recording keeps the door's answer as evidence, but
+        // its Debug, the channel logs use, shows only the count.
+        let evidence = format!("{:?}", recorder.exchanges());
+        assert!(evidence.contains("SECRETSESSION"), "{evidence}");
+        let shown = format!("{recorder:?}");
+        assert!(
+            shown.contains("exchanges: 1") && !shown.contains("SECRET"),
+            "{shown}"
+        );
+    }
+}
+
+/// A dial that never reaches the door is the wire leg's failure, and an
+/// answer in no expected shape names its status: both retry.
+#[tokio::test]
+async fn a_failed_dial_and_an_unreadable_answer_keep_their_cause() {
+    let address = {
+        let dropped = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind the loopback listener");
+        dropped
+            .local_addr()
+            .expect("the owned socket reports its address")
+    };
+    let failure = verifactu::engine::HttpVerifactuTransport::new(
+        &format!("https://{address}/wlpl/TIKE-CONT/ws/SistemaFacturacion/VerifactuSOAP"),
+        Duration::from_secs(10),
+    )
+    .expect("endpoint parses")
+    .send(&envelope_for_primer_alta())
+    .await
+    .expect_err("the dial is refused");
+    assert!(
+        matches!(failure, TransportFailure::Wire { .. }),
+        "{failure:?}"
+    );
+    assert_eq!(EmitError::from(failure).class(), ErrorClass::Transient);
+
+    let (endpoint, roots, identity, _) = aeat_loopback(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        String::from("<html><body>Service unavailable</body></html>"),
+        &[],
+    )
+    .await;
+    let failure = transport_to(&endpoint, roots, &identity)
         .send(&envelope_for_primer_alta())
         .await
-        .expect_err("the gate refuses");
-    assert!(failure.detail.contains("HTTP 302"), "{}", failure.detail);
-    assert!(
-        failure.detail.contains("certificate was not accepted"),
-        "{}",
-        failure.detail
-    );
+        .expect_err("no SOAP shape to read");
+    let TransportFailure::Unreadable { detail } = &failure else {
+        panic!("an answer in no expected shape is unreadable: {failure:?}");
+    };
+    assert!(detail.contains("HTTP 500"), "{detail}");
+    assert_eq!(EmitError::from(failure).class(), ErrorClass::Transient);
 }
 
 fn correcto_answer() -> String {
@@ -188,7 +296,7 @@ async fn a_stand_ins_marked_answer_is_refused_where_only_aeat_may_answer() {
     let (endpoint, roots, identity, served) = aeat_loopback(
         StatusCode::OK,
         correcto_answer(),
-        Some(("x-stand-in", "fake-aeat")),
+        &[("x-stand-in", "fake-aeat")],
     )
     .await;
 
@@ -198,10 +306,11 @@ async fn a_stand_ins_marked_answer_is_refused_where_only_aeat_may_answer() {
         .send(&envelope_for_primer_alta())
         .await
         .expect_err("a marked answer is refused");
-    assert!(
-        failure.detail.contains("stand-in answered") && failure.detail.contains("x-stand-in"),
-        "{}",
-        failure.detail
+    assert_eq!(
+        failure,
+        TransportFailure::StandIn {
+            mark: String::from("x-stand-in")
+        }
     );
 
     let read = transport_to(&endpoint, roots, &identity)
@@ -219,7 +328,7 @@ async fn a_stand_ins_marked_answer_is_refused_where_only_aeat_may_answer() {
 #[tokio::test]
 async fn the_stand_in_guard_reads_an_unmarked_answer_and_refuses_a_bad_mark() {
     let (endpoint, roots, identity, _) =
-        aeat_loopback(StatusCode::OK, correcto_answer(), None).await;
+        aeat_loopback(StatusCode::OK, correcto_answer(), &[]).await;
     let outcome = transport_to(&endpoint, roots.clone(), &identity)
         .refusing_stand_ins("x-stand-in")
         .expect("a header name")

@@ -176,9 +176,9 @@ Rules for new tests:
 
 ## Conventions
 
-- **Errors**: `EmitError` variants map to an `ErrorClass` (`Transient`
-  retries; `OperatorAction`, `InvalidInput`, `Regulatory` and `Bug`
-  never auto-retry). Error codes (`fiscal.invalid-record`, …) are a
+- **Errors**: `EmitError` variants map to an `ErrorClass`, a transport
+  failure by its cause (`Transient` retries; `OperatorAction`,
+  `InvalidInput`, `Regulatory` and `Bug` never auto-retry). Error codes (`fiscal.invalid-record`, …) are a
   stable contract. Never panic on input; a panic documents a bug class
   with `# Panics`.
 - **Vocabularies**: the AEAT spelling lives once, in the `wire()` /

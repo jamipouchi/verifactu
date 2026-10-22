@@ -5,7 +5,8 @@ use std::collections::VecDeque;
 use std::sync::Mutex;
 
 use super::{
-    parse_soap_answer, SendFuture, TransportFailure, TransportOutcome, VerifactuTransport,
+    parse_http_answer, parse_soap_answer, SendFuture, TransportFailure, TransportOutcome,
+    VerifactuTransport,
 };
 use crate::fiscal::consulta::{consulta_response_document, ConsultaSpec, Mes, ResultadoConsulta};
 use crate::fiscal::response::{
@@ -39,7 +40,13 @@ pub enum ScriptedOutcome {
     },
     FaultServer(String),
     FaultClient(String),
+    /// The leg fails before any answer: [`TransportFailure::Wire`].
     Unreachable,
+    /// AEAT's door answers this HTTP status with no SOAP body, read
+    /// through [`parse_http_answer`] as a transport reads it: 301, 302,
+    /// 401 or 403 is [`TransportFailure::Refused`], any other status
+    /// [`TransportFailure::Unreadable`].
+    HttpStatus(u16),
 }
 
 #[derive(Debug, Clone)]
@@ -275,9 +282,8 @@ impl FakeVerifactuTransport {
         self.sent.lock().expect("fake transport state lock").len()
     }
 
-    /// Every scripted document parses back through
-    /// [`parse_soap_answer`] — the fake never drifts from the real read
-    /// edge.
+    /// Every scripted document parses back through the real read edge's
+    /// body half — the fake never drifts from it.
     fn read_back(document: &str) -> TransportOutcome {
         parse_soap_answer(document)
             .expect("the document the fake built parses through the real read edge (bug if not)")
@@ -433,10 +439,11 @@ impl FakeVerifactuTransport {
             });
         Ok(match outcome {
             ScriptedOutcome::Unreachable => {
-                return Err(TransportFailure {
+                return Err(TransportFailure::Wire {
                     detail: String::from("fake transport: scripted unreachable"),
                 })
             }
+            ScriptedOutcome::HttpStatus(status) => return parse_http_answer(status, ""),
             ScriptedOutcome::FaultServer(string) => {
                 Self::read_back(&fault_document("soapenv:Server", &string))
             }

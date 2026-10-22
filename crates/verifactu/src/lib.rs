@@ -36,8 +36,12 @@
 //! nor the signing tree is compiled; supply a signer over your KMS/HSM
 //! or, on remission modalities (whose altas travel unsigned by law), a
 //! pass-through stub. [`endpoint_table`] still names the URLs your
-//! transport dials, and `engine::transport::parse_soap_answer` is the
-//! read edge it should hand the raw answer body to.
+//! transport dials, never following a redirect (a runtime fetch:
+//! `redirect: "manual"`), and [`engine::transport::parse_http_answer`]
+//! is the read edge it hands the answer's status and body to: it types
+//! AEAT's refusal of the client certificate (HTTP 301/302/401/403) by
+//! status alone, so no `Location` reaches an error. A fetch that fails
+//! before any answer is [`TransportFailure::Wire`].
 //!
 //! # Edge runtimes (wasm32: Cloudflare Workers and kin)
 //!
@@ -90,7 +94,11 @@
 //! law (a generic QR library's default level L silently violates it).
 //!
 //! The verdicts ride `verifactu::response` and the retry taxonomy is
-//! [`EmitError::class`] over [`ErrorClass`].
+//! [`EmitError::class`] over [`ErrorClass`]. A [`TransportFailure`]
+//! keeps its cause: a leg that failed before any answer (TLS included)
+//! or an unreadable answer retries; AEAT's door refusing the client
+//! certificate by HTTP status, or a stand-in's answer, is the
+//! operator's.
 
 // The machinery — private; the flat layer and `engine` (the two
 // supported faces) are its only windows.

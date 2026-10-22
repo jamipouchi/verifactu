@@ -85,9 +85,25 @@ impl RecorderShared {
     }
 }
 
-#[derive(Clone, Debug)]
+/// The settled exchanges, verbatim: every header is kept, so a refused
+/// exchange's `Location` and `Set-Cookie`, which carry AEAT's session,
+/// ride the recording. Unlike an error, a recording is evidence, not
+/// text to log: keep it where credentials are kept.
+#[derive(Clone)]
 pub struct Recorder {
     shared: Arc<RecorderShared>,
+}
+
+impl std::fmt::Debug for Recorder {
+    /// Redacted: the count, never the headers a recording holds.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Recorder")
+            .field(
+                "exchanges",
+                &self.shared.0.lock().expect(RECORDER_LOCK).len(),
+            )
+            .finish_non_exhaustive()
+    }
 }
 
 impl Recorder {

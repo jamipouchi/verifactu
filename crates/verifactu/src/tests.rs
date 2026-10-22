@@ -469,6 +469,53 @@ async fn the_fake_echoes_the_records_ref_externa() {
     );
 }
 
+/// AEAT's door refusing the client certificate reaches the product
+/// as the operator's, under its own code; a status with no SOAP answer
+/// retries. The fake reads each through the transports' read edge.
+#[tokio::test]
+async fn a_refused_exchange_reaches_the_flat_face_as_the_operators() {
+    use crate::engine::{FakeSigner, FakeVerifactuTransport, ScriptedOutcome};
+    use crate::{lines, CertificateSource, ErrorClass, InvoiceDraft, Series};
+    let transport = std::sync::Arc::new(FakeVerifactuTransport::new());
+    transport.push_outcome(ScriptedOutcome::HttpStatus(302));
+    transport.push_outcome(ScriptedOutcome::HttpStatus(503));
+    let tenant = root()
+        .tenant(CertificateSource::Custom {
+            signer: std::sync::Arc::new(FakeSigner::new()),
+            transport,
+        })
+        .obligado(crate::Obligado {
+            nombre_razon: String::from("ANA RUIZ PEREZ"),
+            nif: String::from("12345678Z"),
+        })
+        .connect()
+        .expect("hermetic legs");
+    let draft = || {
+        InvoiceDraft::new()
+            .serie(Series::T, 7)
+            .descripcion("venta mostrador")
+            .line(lines::sujeta_iva(2100, 10_000))
+    };
+    let refused = tenant
+        .emit_invoice(draft(), None)
+        .await
+        .expect_err("the door refuses the certificate");
+    assert_eq!(
+        (refused.code(), refused.class()),
+        ("fiscal.transport.refused", ErrorClass::OperatorAction),
+        "{refused}"
+    );
+    let unreadable = tenant
+        .emit_invoice(draft(), None)
+        .await
+        .expect_err("no SOAP answer to read");
+    assert_eq!(
+        (unreadable.code(), unreadable.class()),
+        ("fiscal.transport", ErrorClass::Transient),
+        "{unreadable}"
+    );
+}
+
 /// The bring-your-own door: both custody models wire over injected
 /// legs with no HTTP stack — the emitted envelope travels the
 /// injected transport, and (remission law) the alta rides unsigned.

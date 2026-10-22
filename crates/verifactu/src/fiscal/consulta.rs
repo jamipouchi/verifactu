@@ -22,7 +22,7 @@ use rust_decimal::Decimal;
 
 use crate::domain::chain::{huella_alta_montos, FechaExpedicion, TipoFactura};
 use crate::domain::money::Money;
-use crate::fiscal::transport::{TransportOutcome, VerifactuTransport};
+use crate::fiscal::transport::{TransportFailure, TransportOutcome, VerifactuTransport};
 use crate::fiscal::xml::{self, tag, Tree};
 use crate::fiscal::{EmitError, Obligado};
 
@@ -352,8 +352,10 @@ pub(crate) fn consulta_document(request: &ConsultaRequest<'_>) -> Result<String,
 
 // ---- parse -------------------------------------------------------------
 
-/// The consulta read edge (the twin of `parse_soap_answer`'s
-/// submission half): a SOAP envelope or the bare respuesta root.
+/// The consulta's answer alone, read as [`parse_http_answer`] reads it
+/// beside the submission's: a SOAP envelope or the bare respuesta root.
+///
+/// [`parse_http_answer`]: crate::fiscal::transport::parse_http_answer
 ///
 /// # Errors
 /// Prose `Err` when the document carries neither shape or holds an
@@ -496,7 +498,8 @@ fn registro_of_tree(node: &Tree) -> Result<RegistroConsulta, String> {
 ///
 /// # Errors
 /// [`EmitError::InvalidRecord`] off-contract; [`EmitError::Transport`]
-/// on the wire leg or a submission-shaped answer to a consulta;
+/// with the transport's failure, or with [`TransportFailure::Unreadable`]
+/// on a submission-shaped answer to a consulta;
 /// [`EmitError::FaultClient`]/[`EmitError::FaultServer`] on a SOAP
 /// fault.
 pub async fn send_once(
@@ -507,9 +510,10 @@ pub async fn send_once(
     match transport.send(&xml::soap_envelope(&body)).await? {
         TransportOutcome::Fault(fault) => Err(fault.into()),
         TransportOutcome::Consulta(answer) => Ok(answer),
-        TransportOutcome::Response(_) => Err(EmitError::Transport {
+        TransportOutcome::Response(_) => Err(TransportFailure::Unreadable {
             detail: String::from("AEAT answered a submission respuesta to a consulta"),
-        }),
+        }
+        .into()),
     }
 }
 
@@ -517,9 +521,9 @@ pub async fn send_once(
 /// the same `VerifactuSOAP` endpoint as remission.
 ///
 /// # Errors
-/// [`EmitError`] from [`send_once`]; a `Transport` error when AEAT
-/// signals more pages without a pagination key, or the pages exceed
-/// 100 (a bug class, never an input).
+/// [`EmitError`] from [`send_once`]; [`EmitError::Transport`] with
+/// [`TransportFailure::Unreadable`] when AEAT signals more pages without
+/// a pagination key, or past the loop's 100-page bound.
 pub async fn send_all(
     transport: &Arc<dyn VerifactuTransport>,
     obligado: &Obligado,
@@ -549,17 +553,21 @@ pub async fn send_all(
             });
         }
         if page.clave_paginacion.is_none() {
-            return Err(EmitError::Transport {
+            return Err(TransportFailure::Unreadable {
                 detail: String::from(
                     "AEAT signaled more pages (IndicadorPaginacion=S) without a ClavePaginacion",
                 ),
-            });
+            }
+            .into());
         }
         clave = page.clave_paginacion;
     }
-    Err(EmitError::Transport {
-        detail: String::from("consulta exceeded 100 pages — a bug class, never an input"),
-    })
+    Err(TransportFailure::Unreadable {
+        detail: String::from(
+            "AEAT signaled more pages (IndicadorPaginacion=S) past the consulta's 100-page bound",
+        ),
+    }
+    .into())
 }
 
 #[cfg(any(test, feature = "fakes"))]

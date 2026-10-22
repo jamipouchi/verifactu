@@ -11,11 +11,9 @@ pub mod p12;
 use std::time::Duration;
 
 use crate::fiscal::transport::{
-    parse_soap_answer, SendFuture, TransportFailure, VerifactuTransport,
+    parse_http_answer, SendFuture, TransportFailure, VerifactuTransport,
 };
 use crate::wire::{HttpWireClient, Recorder};
-
-use http::StatusCode;
 
 use p12::ClientIdentity;
 
@@ -99,8 +97,9 @@ impl HttpVerifactuTransport {
     /// header: the mark a deployment's stand-ins (its fake AEAT, a
     /// bench) put on their answers, so a build that must reach AEAT never
     /// reads a stand-in's verdict as AEAT's, wherever the endpoint points.
-    /// AEAT sends no such header. A refused answer is a
-    /// [`TransportFailure`], as for any exchange that did not reach AEAT.
+    /// AEAT sends no such header. A refused answer is
+    /// [`TransportFailure::StandIn`], which no retry heals: the endpoint
+    /// is not AEAT's.
     ///
     /// # Errors
     /// [`WireBuildError::Mark`] when `mark` is no HTTP header name.
@@ -128,7 +127,7 @@ impl VerifactuTransport for HttpVerifactuTransport {
                 .body(soap_envelope.to_owned())
                 .expect("a String body with a POST builder cannot fail");
             match self.client.send(request).await {
-                Err(wire) => Err(TransportFailure {
+                Err(wire) => Err(TransportFailure::Wire {
                     detail: wire.to_string(),
                 }),
                 Ok(response) => {
@@ -139,44 +138,13 @@ impl VerifactuTransport for HttpVerifactuTransport {
                         .as_ref()
                         .filter(|mark| response.headers().contains_key(*mark))
                     {
-                        return Err(TransportFailure {
-                            detail: format!(
-                                "a stand-in answered (its {mark} header), where only AEAT may — \
-                                 {} is not AEAT's door",
-                                self.endpoint
-                            ),
+                        return Err(TransportFailure::StandIn {
+                            mark: mark.as_str().to_owned(),
                         });
                     }
-                    let status = response.status();
-                    // AEAT's certificate gate: an unaccepted client
-                    // certificate answers HTTP 302 to the sede error
-                    // page (erro4011) with the TLS handshake complete —
-                    // the operator's likeliest misconfiguration; name
-                    // it, never a generic parse failure.
-                    if status == StatusCode::FOUND
-                        || status == StatusCode::MOVED_PERMANENTLY
-                        || status == StatusCode::UNAUTHORIZED
-                        || status == StatusCode::FORBIDDEN
-                    {
-                        let location = response
-                            .headers()
-                            .get(http::header::LOCATION)
-                            .and_then(|value| value.to_str().ok())
-                            .unwrap_or("<no location header>");
-                        return Err(TransportFailure {
-                            detail: format!(
-                                "AEAT refused the exchange (HTTP {status} -> {location}) — the \
-                                 client certificate was not accepted"
-                            ),
-                        });
-                    }
-                    let body = response.into_body();
-                    match parse_soap_answer(&body) {
-                        Ok(outcome) => Ok(outcome),
-                        Err(detail) => Err(TransportFailure {
-                            detail: format!("unparseable AEAT answer (HTTP {status}): {detail}"),
-                        }),
-                    }
+                    // Past the mark, the status and the body are all
+                    // that is read: never the redirect's Location.
+                    parse_http_answer(response.status().as_u16(), response.body())
                 }
             }
         })
