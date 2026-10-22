@@ -96,7 +96,14 @@ an HS/SW/QR spec section, or "live-confirmed <date>" for behaviour
 observed at AEAT pruebas). Every gate is tested on
 **both** edges: what it admits and what it refuses. When AEAT's
 documents and AEAT's behaviour differ, follow the behaviour and record
-it in the comment.
+it in the comment. Where a Validaciones section and an error code's
+text differ, AEAT applies the code as written (live 2026-10-22: 1146
+binds every line, 1165 and 1277 bind 0 %'s recargo): follow the code
+until the bench says otherwise.
+
+Anything new on the wire gets a probe in the live bench (`bench/`,
+outside git) before its rev is pushed: AEAT, not the gate, has the last
+word.
 
 What AEAT refuses depends on the regime (Validaciones §4):
 
@@ -104,8 +111,10 @@ What AEAT refuses depends on the regime (Validaciones §4):
   every business rule reject the record — all of `rules.rs` applies.
   Only the listed "admisible" errors pass with a warning (the
   CuotaTotal/ImporteTotal sums, the huella, `PrimerRegistro`, a future
-  `FechaHoraHusoGenRegistro`, a "no censado" destinatario); never refuse
-  those.
+  `FechaHoraHusoGenRegistro`, a "no censado" destinatario, an IPSI line
+  without `ClaveRegimen` until 31-12-2026); never refuse those. An IPSI
+  clave off its list is no aviso: AEAT already rejects it (1246, live
+  2026-10-22).
 - **Bajo requerimiento** (`Modality::Conservation`): business errors are
   admissible — conserved records travel as generated — so only the
   schema, syntax and NIF/IDOtro identification apply, plus the crate's
@@ -114,6 +123,14 @@ What AEAT refuses depends on the regime (Validaciones §4):
 `record_node` takes the modality for exactly this reason. A new AEAT
 rule goes in `rules.rs` if it is a business rule, in `xml.rs` if every
 regime enforces it.
+
+A dated rule reads the date AEAT names. The rates, their recargo and
+the UK NIF-IVA prefix read `FechaOperacion`, else
+`FechaExpedicionFactura`. AEAT's "fecha actual" is the record's
+reception, which no gate can know, so the record's generation stands for
+it: that errs strict on an upper bound (1112, 1125, 1173) and loose on a
+lower bound or a cutover (1134, the missing IPSI clave from
+01-01-2027), and the gate's comment says which.
 
 Laws worth knowing before you touch `fiscal/xml.rs`:
 

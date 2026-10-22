@@ -428,6 +428,9 @@ pub(crate) fn registro_alta(
         }
         out.push_str("</sum1:ImporteRectificacion>");
     }
+    if let Some(fecha_operacion) = &ctx.fecha_operacion {
+        tag(&mut out, "sum1:FechaOperacion", fecha_operacion.as_str());
+    }
     tag(&mut out, "sum1:DescripcionOperacion", descripcion);
     if let Some(macrodato) = ctx.macrodato {
         tag(&mut out, "sum1:Macrodato", macrodato.wire());
@@ -532,16 +535,19 @@ fn check_alta(
             &rectificada.num_serie,
         )?;
     }
+    // Nota 1 dates the NIF-IVA by the operation.
+    let operacion = ctx.fecha_operacion.as_ref().unwrap_or(fecha).ymd();
     for destinatario in ctx.destinatarios {
-        check_destinatario(destinatario, &obligado.nif, fecha.ymd())?;
+        check_destinatario(destinatario, &obligado.nif, operacion)?;
     }
     Ok(())
 }
 
 /// Whether `id` has the structure of a member state's NIF-IVA as AEAT
 /// validates it (Validaciones §3.1.3.13, Nota 1): the uppercase country
-/// prefix, then the number. Northern Ireland: `GB` before 2021, `GB` or
-/// `XI` in January 2021, `XI` after.
+/// prefix, then the number. Northern Ireland by the operation's date
+/// (`FechaOperacion`, else `FechaExpedicionFactura`; AEAT 1254, 1255):
+/// `GB` before 2021, `GB` or `XI` in January 2021, `XI` after.
 pub(crate) fn is_nif_iva(id: &str, fecha: (i64, u32, u32)) -> bool {
     let (Some(prefix), Some(number)) = (id.get(..2), id.get(2..)) else {
         return false;
@@ -1492,6 +1498,40 @@ mod tests {
         assert!(is_nif_iva("GB123456789", (2020, 12, 31)));
         assert!(!is_nif_iva("XI123456789", (2020, 12, 31)));
         assert!(is_nif_iva("GB123456789", (2021, 1, 15)));
+    }
+
+    /// Nota 1 dates the UK prefix by the operation, `FechaOperacion`
+    /// else the factura's date (AEAT 1254, 1255), in every regime.
+    #[test]
+    fn the_nif_iva_reads_the_operation_date() {
+        use crate::domain::chain::FechaExpedicion;
+        use crate::fiscal::{IDDestinatario, IdOtro, IdOtroType, IdentificacionDestinatario};
+        let desglose = [iva_super()];
+        let admitted = |id: &str, operacion: Option<&str>| {
+            let destinatarios = [IDDestinatario {
+                nombre_razon: String::from("CLIENT LTD"),
+                identificacion: IdentificacionDestinatario::Otro(IdOtro {
+                    codigo_pais: None,
+                    id_type: IdOtroType::NifIva,
+                    id: id.to_owned(),
+                }),
+            }];
+            let ctx = EmissionContext {
+                descripcion_operacion: Some("venta"),
+                desglose: &desglose,
+                destinatarios: &destinatarios,
+                fecha_operacion: operacion
+                    .map(|fecha| FechaExpedicion::parse(fecha).expect("a date")),
+                ..EmissionContext::default()
+            };
+            let record = primer_alta_record();
+            registro_alta(&record, &ctx, &obligado(), &sif(), Modality::Conservation).is_ok()
+        };
+        // The factura is dated 03-02-2025.
+        assert!(admitted("XI123456789", None));
+        assert!(!admitted("GB123456789", None));
+        assert!(admitted("GB123456789", Some("31-12-2020")));
+        assert!(!admitted("XI123456789", Some("31-12-2020")));
     }
 
     /// AEAT's identification codes, each on both edges.

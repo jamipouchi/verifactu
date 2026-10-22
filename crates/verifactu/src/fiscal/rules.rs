@@ -84,6 +84,7 @@ pub(crate) fn check_alta(
         ));
     }
     check_rectificacion(ctx, tipo)?;
+    check_fecha_operacion(ctx, date, generado.ymd())?;
     if importe_total.as_cents().abs() >= 10_000_000_000 && ctx.macrodato.is_none() {
         return Err(refuse(
             "Macrodato",
@@ -91,9 +92,16 @@ pub(crate) fn check_alta(
         ));
     }
     check_destinatarios(ctx, tipo)?;
+    // §15.1, §15.3: the rates in force on the operation, which the
+    // factura's date stands for when no FechaOperacion is declared.
+    let operacion = ctx
+        .fecha_operacion
+        .as_ref()
+        .map_or(date, FechaExpedicion::ymd);
     for detalle in ctx.desglose {
-        check_detalle(detalle, ctx, tipo, date, generado.ymd())?;
+        check_detalle(detalle, ctx, tipo, operacion, generado.ymd())?;
     }
+    check_clave_14(ctx, tipo, date)?;
     if tipo == TipoFactura::F2 {
         let total: i64 = ctx
             .desglose
@@ -130,6 +138,88 @@ fn check_rectificacion(ctx: &EmissionContext<'_>, tipo: TipoFactura) -> Result<(
         return Err(refuse(
             "ImporteRectificacion",
             "required when TipoRectificativa is S, and only then (§3.1.3.6)",
+        ));
+    }
+    Ok(())
+}
+
+/// Whether every line is IVA, IGIC or Impuesto-less under 14 or 15, the
+/// claves whose operation may postdate the factura and the record. AEAT
+/// 1146 and 1173 bind "los detalles del desglose", every line, where
+/// §3.1.3.1 and §3.1.3.7 name only IVA and IGIC; AEAT applies the codes
+/// (live-confirmed 2026-10-22: an IPSI-only record, and an IVA line under
+/// 15 beside an IPSI line, each with a later `FechaOperacion`, answered
+/// 1146).
+fn devengo_posterior(ctx: &EmissionContext<'_>) -> bool {
+    ctx.desglose.iter().all(|d| {
+        matches!(d.impuesto, None | Some(Impuesto::Iva | Impuesto::Igic))
+            && matches!(d.clave_regimen, Some(Clave::C14 | Clave::C15))
+    })
+}
+
+/// §3.1.3.7, and §3.1.3.1's bound by the expedition. AEAT measures "the
+/// current date" at reception, never before the record's generation,
+/// which stands for it here. Against the upper bounds (1125, 1173) it
+/// errs strict, as for `FechaExpedicionFactura` (1112): a date admitted
+/// against the generation is admitted at any later reception. Against
+/// the lower one (1134) it errs loose: the very day twenty years back
+/// passes here, and AEAT rejects it if the record arrives on a later
+/// day.
+fn check_fecha_operacion(
+    ctx: &EmissionContext<'_>,
+    expedicion: Ymd,
+    generado: Ymd,
+) -> Result<(), SerializeError> {
+    let Some(fecha_operacion) = &ctx.fecha_operacion else {
+        return Ok(());
+    };
+    let field = "FechaOperacion";
+    let operacion = fecha_operacion.ymd();
+    let (year, month, day) = generado;
+    // The same day twenty years back: as a tuple, 29-02 needs no calendar.
+    if operacion < (year - 20, month, day) {
+        return Err(refuse(
+            field,
+            format!(
+                "{fecha_operacion} is more than twenty years before the record's generation \
+                 ({}) (AEAT 1134, §3.1.3.7)",
+                date_label(generado)
+            ),
+        ));
+    }
+    // "No debe ser superior al año siguiente de la fecha actual", read by
+    // the year: every day of the year after the generation's is admitted
+    // (live-confirmed 2026-10-22: 31-12 of the next year Correcto, 01-01
+    // of the year after it 1125).
+    if operacion.0 > year + 1 {
+        return Err(refuse(
+            field,
+            format!(
+                "{fecha_operacion} is past {}, the year after the record's generation (AEAT \
+                 1125, §3.1.3.7)",
+                year + 1
+            ),
+        ));
+    }
+    let posterior = devengo_posterior(ctx);
+    if operacion > generado && !posterior {
+        return Err(refuse(
+            field,
+            format!(
+                "{fecha_operacion} is after the record's generation ({}): only when every \
+                 line is IVA or IGIC under ClaveRegimen 14 or 15 (AEAT 1173, §3.1.3.7)",
+                date_label(generado)
+            ),
+        ));
+    }
+    if operacion > expedicion && !posterior {
+        return Err(refuse(
+            field,
+            format!(
+                "{fecha_operacion} is after FechaExpedicionFactura ({}): only when every \
+                 line is IVA or IGIC under ClaveRegimen 14 or 15 (AEAT 1146, §3.1.3.1)",
+                date_label(expedicion)
+            ),
         ));
     }
     Ok(())
@@ -184,8 +274,14 @@ fn check_destinatarios(ctx: &EmissionContext<'_>, tipo: TipoFactura) -> Result<(
     Ok(())
 }
 
-/// The ten IVA rates by date (§15.1): 5 % from 01-07-2022 to 30-09-2024;
-/// 2 % and 7,5 % from 01-10-2024 to 31-12-2024.
+/// The IVA rates by the operation's date (§15.1): 0, 4, 10 and 21 %; 5 %
+/// from 01-07-2022 to 30-09-2024; 2 % and 7,5 % from 01-10-2024 to
+/// 31-12-2024. Live-confirmed 2026-10-22: an R1 at 5 % for an operation
+/// of 30-09-2024 answered Correcto, and 1194 without its `FechaOperacion`.
+/// AEAT 1132 and 1135 speak of a rate permitted for an operation
+/// "inferior o igual al año 2012", but §15.1 closes its list, and AEAT
+/// answered 18 % for an operation of 15-06-2011 with 1124 (live-confirmed
+/// 2026-10-22).
 fn iva_rate_admitted(rate: i64, date: Ymd) -> bool {
     match rate {
         0 | 400 | 1000 | 2100 => true,
@@ -195,7 +291,12 @@ fn iva_rate_admitted(rate: i64, date: Ymd) -> bool {
     }
 }
 
-/// The recargo de equivalencia each IVA rate admits (§15.3).
+/// The recargo de equivalencia each IVA rate admits (§15.3). On 0 %, AEAT
+/// admits recargo 0 alone, and only from 01-01-2023 to 30-09-2024 (1165);
+/// any other is 1277, 0,26 from 01-10-2024 included whatever 1170 says.
+/// Live-confirmed 2026-10-22: 0 on an operation of 15-06-2024 answered
+/// Correcto; on an operation of that day, 0 answered 1165, and 0,5 and
+/// 0,26 answered 1277.
 fn recargo_admitted(rate: i64, recargo: i64, date: Ymd) -> bool {
     if ![0, 26, 50, 62, 100, 140, 175, 520].contains(&recargo) {
         return false;
@@ -208,7 +309,7 @@ fn recargo_admitted(rate: i64, recargo: i64, date: Ymd) -> bool {
         500 => recargo == 62,
         400 => recargo == 50,
         200 => recargo == 26,
-        0 if within(date, (2023, 1, 1), (2024, 9, 30)) => recargo == 0,
+        0 => recargo == 0 && within(date, (2023, 1, 1), (2024, 9, 30)),
         _ => true,
     }
 }
@@ -218,7 +319,7 @@ fn check_detalle(
     d: &DetalleDesglose,
     ctx: &EmissionContext<'_>,
     tipo: TipoFactura,
-    date: Ymd,
+    operacion: Ymd,
     generado: Ymd,
 ) -> Result<(), SerializeError> {
     let iva = matches!(d.impuesto, None | Some(Impuesto::Iva));
@@ -238,25 +339,27 @@ fn check_detalle(
     // §15.1, §15.3 — the rates an IVA S1 line admits.
     if iva && d.calificacion == Some(Calificacion::SujetaNoExenta) {
         if let Some(rate) = d.tipo_impositivo.map(Money::as_cents) {
-            if !iva_rate_admitted(rate, date) {
+            if !iva_rate_admitted(rate, operacion) {
                 return Err(refuse(
                     "DetalleDesglose/TipoImpositivo",
                     format!(
-                        "{} % is not an IVA rate on {} (0, 4, 10, 21; 5 until 30-09-2024; 2 and \
-                         7,5 in Q4 2024) (§15.1)",
+                        "{} % is not an IVA rate for an operation on {} (0, 4, 10, 21; 5 from \
+                         01-07-2022 to 30-09-2024; 2 and 7,5 in Q4 2024) (§15.1)",
                         Money::from_cents(rate),
-                        date_label(date)
+                        date_label(operacion)
                     ),
                 ));
             }
             if let Some(recargo) = d.tipo_recargo_equivalencia.map(Money::as_cents) {
-                if !recargo_admitted(rate, recargo, date) {
+                if !recargo_admitted(rate, recargo, operacion) {
                     return Err(refuse(
                         "DetalleDesglose/TipoRecargoEquivalencia",
                         format!(
-                            "{} % is not the recargo IVA {} % admits (§15.3)",
+                            "{} % is not the recargo IVA {} % admits for an operation on {} \
+                             (§15.3)",
                             Money::from_cents(recargo),
-                            Money::from_cents(rate)
+                            Money::from_cents(rate),
+                            date_label(operacion)
                         ),
                     ));
                 }
@@ -432,11 +535,10 @@ fn check_clave(
             calificacion,
             None | Some(Calificacion::SujetaNoExentaInversion)
         ),
-        Some(Clave::C06 | Clave::C14) => {
+        Some(Clave::C06) => {
             return Err(refuse(
                 field,
-                "06 requires BaseImponibleACoste and 14 FechaOperacion, which this crate does \
-                 not emit (§15.6.4, §15.6.9)",
+                "06 requires BaseImponibleACoste, which this crate does not emit (§15.6.4)",
             ));
         }
         Some(Clave::C07) => {
@@ -472,6 +574,8 @@ fn check_clave(
         // with no recargo on 2026-10-17). The key names the issuer's
         // regime, not the recargo; `lines::RegimenEmisor` is where the two
         // meet.
+        //
+        // 14 binds the record, not the line: `check_clave_14`.
         _ => true,
     };
     if ok {
@@ -490,6 +594,67 @@ fn check_clave(
     ))
 }
 
+/// §15.6.9: a record with a line under 14 (IVA pendiente AAPP) declares a
+/// `FechaOperacion` after its expedition, is an F1 or R1–R4, and names
+/// every destinatario by a NIF starting with P, Q, S or V (whether that
+/// NIF is in the census is AEAT's to check). §15.6.9 names IVA and IGIC
+/// lines; 1147–1149 read "Si `ClaveRegimen` es 14" of any line, and AEAT
+/// applies its codes as written (1146, live 2026-10-22), so any line
+/// binds. Live-confirmed 2026-10-22: an F1 under 14 to Q2826000H with a
+/// later `FechaOperacion` answered Correcto; an IPSI line under 14 answered
+/// 1246, refused either way.
+fn check_clave_14(
+    ctx: &EmissionContext<'_>,
+    tipo: TipoFactura,
+    expedicion: Ymd,
+) -> Result<(), SerializeError> {
+    let declared = ctx
+        .desglose
+        .iter()
+        .any(|d| d.clave_regimen == Some(Clave::C14));
+    if !declared {
+        return Ok(());
+    }
+    if ctx
+        .fecha_operacion
+        .as_ref()
+        .is_none_or(|fecha| fecha.ymd() <= expedicion)
+    {
+        return Err(refuse(
+            "FechaOperacion",
+            "ClaveRegimen 14 requires it, after FechaExpedicionFactura (AEAT 1147, §15.6.9)",
+        ));
+    }
+    if !matches!(
+        tipo,
+        TipoFactura::F1 | TipoFactura::R1 | TipoFactura::R2 | TipoFactura::R3 | TipoFactura::R4
+    ) {
+        return Err(refuse(
+            "TipoFactura",
+            format!(
+                "ClaveRegimen 14 admits F1 and R1–R4, got {} (AEAT 1148, §15.6.9)",
+                tipo.as_str()
+            ),
+        ));
+    }
+    let publico = |identificacion: &IdentificacionDestinatario| {
+        matches!(identificacion, IdentificacionDestinatario::Nif(nif)
+            if nif.starts_with(['P', 'Q', 'S', 'V']))
+    };
+    if !ctx
+        .destinatarios
+        .iter()
+        .all(|destinatario| publico(&destinatario.identificacion))
+    {
+        return Err(refuse(
+            "IDDestinatario/NIF",
+            "under ClaveRegimen 14 every destinatario is a NIF starting with P, Q, S or V \
+             (AEAT 1149, §15.6.9)",
+        ));
+    }
+    Ok(())
+}
+
 fn date_label((year, month, day): Ymd) -> String {
     format!("{day:02}-{month:02}-{year}")
 }
@@ -503,8 +668,9 @@ mod tests {
     use crate::fiscal::tests_support::{iva_super, obligado, primer_alta_record, sif};
     use crate::fiscal::{
         xml, CalificacionOperacion as Calificacion, ClaveRegimen as Clave, DetalleDesglose,
-        EmissionContext, IDDestinatario, IdOtro, IdOtroType, IdentificacionDestinatario, Impuesto,
-        Modality, OperacionExenta as Exenta, RechazoPrevio, SiNo, TipoRectificativa,
+        EmissionContext, IDDestinatario, IdOtro, IdOtroType, IdentificacionDestinatario,
+        ImporteRectificacion, Impuesto, Modality, OperacionExenta as Exenta, RechazoPrevio, SiNo,
+        TipoRectificativa,
     };
 
     fn fecha(value: &str) -> FechaExpedicion {
@@ -518,6 +684,10 @@ mod tests {
             .expect("an ISO instant")
     }
 
+    fn instante(value: &str) -> FechaHuso {
+        FechaHuso::parse(value).expect("an ISO instant")
+    }
+
     fn nif_dest() -> IDDestinatario {
         IDDestinatario {
             nombre_razon: String::from("CLIENTE SL"),
@@ -529,6 +699,17 @@ mod tests {
     fn verdict<'a>(
         tipo: TipoFactura,
         on: &str,
+        lines: &'a [DetalleDesglose],
+        with: impl FnOnce(&mut EmissionContext<'a>),
+    ) -> Result<(), String> {
+        verdict_at(tipo, on, &generado(&fecha(on)), lines, with)
+    }
+
+    /// [`verdict`] for a record generated at `generado`.
+    fn verdict_at<'a>(
+        tipo: TipoFactura,
+        on: &str,
+        generado: &FechaHuso,
         lines: &'a [DetalleDesglose],
         with: impl FnOnce(&mut EmissionContext<'a>),
     ) -> Result<(), String> {
@@ -555,7 +736,7 @@ mod tests {
             &ctx,
             tipo,
             &fecha(on),
-            &generado(&fecha(on)),
+            generado,
             "T00000001",
             Money::from_cents(importe),
         )
@@ -864,13 +1045,215 @@ mod tests {
             ..iva_super()
         };
         refused(verdict(F2, DAY, &[no_clave], |_| {}), "1245");
-        for clave in [Clave::C08, Clave::C06, Clave::C14] {
+        for clave in [Clave::C08, Clave::C06] {
             let line = DetalleDesglose {
                 clave_regimen: Some(clave),
                 ..iva_super()
             };
             refused(verdict(F2, DAY, &[line], |_| {}), "§15.6");
         }
+    }
+
+    /// §15.1, §15.3: the rates in force on the operation, its
+    /// `FechaOperacion`, else the factura's date. A sustitutiva issued after
+    /// a rate ended keeps the rate its sale was made at.
+    #[test]
+    fn the_dated_rates_read_the_operation() {
+        let sustitutiva = |rate: i64, operacion: Option<&str>| {
+            let lines = [line(rate, 10_000, rate)];
+            verdict(TipoFactura::R1, DAY, &lines, |c| {
+                c.tipo_rectificativa = Some(TipoRectificativa::Sustitutiva);
+                c.importe_rectificacion = Some(ImporteRectificacion {
+                    base_rectificada: Money::from_cents(10_000),
+                    cuota_rectificada: Money::from_cents(rate),
+                    cuota_recargo_rectificado: None,
+                });
+                c.fecha_operacion = operacion.map(fecha);
+            })
+        };
+        // 5 % from 01-07-2022 to 30-09-2024.
+        assert_eq!(sustitutiva(500, Some("01-07-2022")), Ok(()));
+        assert_eq!(sustitutiva(500, Some("30-09-2024")), Ok(()));
+        refused(sustitutiva(500, None), "§15.1");
+        refused(sustitutiva(500, Some("30-06-2022")), "§15.1");
+        refused(sustitutiva(500, Some("01-10-2024")), "§15.1");
+        // 2 % and 7,5 % from 01-10-2024 to 31-12-2024.
+        for rate in [200, 750] {
+            assert_eq!(sustitutiva(rate, Some("01-10-2024")), Ok(()));
+            assert_eq!(sustitutiva(rate, Some("31-12-2024")), Ok(()));
+            refused(sustitutiva(rate, None), "§15.1");
+            refused(sustitutiva(rate, Some("30-09-2024")), "§15.1");
+            refused(sustitutiva(rate, Some("01-01-2025")), "§15.1");
+        }
+        // §15.1 closes the list against AEAT 1132's pre-2013 rates.
+        refused(sustitutiva(1800, Some("15-06-2011")), "§15.1");
+        // The recargo pairs by the operation too: on 5 %, 0,5 until
+        // 31-12-2022 and 0,62 after...
+        let recargo = |rate_cents, recargo_rate_cents, operacion: &str| {
+            let lines = [lines::sujeta_iva_recargo(
+                rate_cents,
+                lines::RegimenEmisor::General { recargo_rate_cents },
+                10_000,
+            )];
+            verdict(F1, DAY, &lines, |c| {
+                c.fecha_operacion = Some(fecha(operacion));
+            })
+        };
+        assert_eq!(recargo(500, 50, "31-12-2022"), Ok(()));
+        refused(recargo(500, 50, "01-01-2023"), "§15.3");
+        assert_eq!(recargo(500, 62, "01-01-2023"), Ok(()));
+        refused(recargo(500, 62, "31-12-2022"), "§15.3");
+        // ...and on 0 %, none but 0 from 01-01-2023 to 30-09-2024.
+        for operacion in ["01-01-2023", "30-09-2024"] {
+            assert_eq!(recargo(0, 0, operacion), Ok(()));
+            refused(recargo(0, 50, operacion), "§15.3");
+        }
+        // ...and none outside it, 1170's 0,26 included (1165, 1277).
+        for operacion in ["31-12-2022", "01-10-2024", DAY] {
+            for recargo_rate in [0, 26, 50] {
+                refused(recargo(0, recargo_rate, operacion), "§15.3");
+            }
+        }
+    }
+
+    /// §3.1.3.7 and §3.1.3.1: `FechaOperacion` within twenty years back
+    /// and the next year ahead, and after the factura or its record only
+    /// when every line is IVA or IGIC under 14 or 15.
+    #[test]
+    fn the_operation_date_and_its_bounds() {
+        let general = [iva_super()];
+        let c15 = DetalleDesglose {
+            clave_regimen: Some(Clave::C15),
+            ..iva_super()
+        };
+        let diferida = [c15.clone()];
+        let run = |on: &str, generado: &str, lines: &[DetalleDesglose], operacion: &str| {
+            verdict_at(F2, on, &instante(generado), lines, |c| {
+                c.fecha_operacion = Some(fecha(operacion));
+            })
+        };
+        let noon = "2025-02-03T12:00:00+01:00";
+        // AEAT 1134: the same day twenty years back, 29-02 included.
+        assert_eq!(run(DAY, noon, &general, "03-02-2005"), Ok(()));
+        refused(run(DAY, noon, &general, "02-02-2005"), "1134");
+        let leap = "2028-02-29T12:00:00+01:00";
+        assert_eq!(run("29-02-2028", leap, &general, "29-02-2008"), Ok(()));
+        refused(run("29-02-2028", leap, &general, "28-02-2008"), "1134");
+        // AEAT 1125: no later than the year after the generation's.
+        assert_eq!(run(DAY, noon, &diferida, "31-12-2026"), Ok(()));
+        refused(run(DAY, noon, &diferida, "01-01-2027"), "1125");
+        // AEAT 1146: after the factura only under 14 or 15...
+        let later = "2025-02-05T12:00:00+01:00";
+        assert_eq!(run(DAY, later, &general, "03-02-2025"), Ok(()));
+        refused(run(DAY, later, &general, "04-02-2025"), "1146");
+        assert_eq!(run(DAY, later, &diferida, "04-02-2025"), Ok(()));
+        // ...and AEAT 1173: after the record's generation only under them.
+        refused(run(DAY, later, &general, "05-02-2025"), "1146");
+        refused(run(DAY, later, &general, "06-02-2025"), "1173");
+        assert_eq!(run(DAY, later, &diferida, "06-02-2025"), Ok(()));
+        // An IGIC line binds as an IVA one does, and an IPSI line, which
+        // can declare neither 14 nor 15, keeps any record from postdating.
+        let igic = DetalleDesglose {
+            impuesto: Some(Impuesto::Igic),
+            ..line(700, 1000, 70)
+        };
+        refused(run(DAY, later, &[c15.clone(), igic], "04-02-2025"), "1146");
+        let sin_impuesto = DetalleDesglose {
+            impuesto: None,
+            ..iva_super()
+        };
+        refused(
+            run(DAY, later, &[c15.clone(), sin_impuesto], "04-02-2025"),
+            "1146",
+        );
+        let ipsi = DetalleDesglose {
+            impuesto: Some(Impuesto::Ipsi),
+            ..iva_super()
+        };
+        refused(run(DAY, later, &[c15, ipsi.clone()], "04-02-2025"), "1146");
+        let solo_ipsi = [ipsi];
+        refused(run(DAY, later, &solo_ipsi, "04-02-2025"), "1146");
+        refused(run(DAY, later, &solo_ipsi, "06-02-2025"), "1173");
+        assert_eq!(run(DAY, later, &solo_ipsi, "03-02-2025"), Ok(()));
+    }
+
+    /// §15.6.9 and 1147–1149: a line under 14 binds the whole record.
+    #[test]
+    fn clave_14_binds_the_record() {
+        let aapp = [DetalleDesglose {
+            clave_regimen: Some(Clave::C14),
+            ..iva_super()
+        }];
+        let publico = |nif: &str| -> &'static [IDDestinatario] {
+            Box::leak(Box::new([IDDestinatario {
+                nombre_razon: String::from("AYUNTAMIENTO"),
+                identificacion: IdentificacionDestinatario::Nif(nif.to_owned()),
+            }]))
+        };
+        let run_lines = |lines, tipo, operacion: Option<&str>, destinatarios| {
+            verdict(tipo, DAY, lines, |c| {
+                c.fecha_operacion = operacion.map(fecha);
+                c.destinatarios = destinatarios;
+            })
+        };
+        let run = |tipo, operacion, destinatarios| run_lines(&aapp, tipo, operacion, destinatarios);
+        let ayuntamiento = publico("P2807900B");
+        // AEAT 1147: a FechaOperacion after the expedition, here also
+        // after the record (1173 admits it under 14).
+        assert_eq!(run(F1, Some("04-02-2025"), ayuntamiento), Ok(()));
+        assert_eq!(run(F1, Some("30-06-2026"), ayuntamiento), Ok(()));
+        refused(run(F1, Some(DAY), ayuntamiento), "1147");
+        refused(run(F1, None, ayuntamiento), "1147");
+        // An IGIC line and one with no Impuesto bind as an IVA one does.
+        let igic = [DetalleDesglose {
+            impuesto: Some(Impuesto::Igic),
+            clave_regimen: Some(Clave::C14),
+            ..line(700, 1000, 70)
+        }];
+        let sin_impuesto = [DetalleDesglose {
+            impuesto: None,
+            ..aapp[0].clone()
+        }];
+        for lines in [&igic[..], &sin_impuesto[..]] {
+            assert_eq!(
+                run_lines(lines, F1, Some("04-02-2025"), ayuntamiento),
+                Ok(())
+            );
+            refused(run_lines(lines, F1, None, ayuntamiento), "1147");
+        }
+        // AEAT 1148: F1 and R1–R4.
+        for tipo in [TipoFactura::R1, TipoFactura::R4] {
+            assert_eq!(run(tipo, Some("04-02-2025"), ayuntamiento), Ok(()));
+        }
+        refused(
+            run(TipoFactura::F3, Some("04-02-2025"), ayuntamiento),
+            "1148",
+        );
+        // F2 and R5 carry no destinatarios: 1148 alone refuses them.
+        for tipo in [F2, TipoFactura::R5] {
+            refused(run(tipo, Some("04-02-2025"), &[]), "1148");
+        }
+        // AEAT 1149: every destinatario a NIF starting with P, Q, S or V.
+        for nif in ["Q2826000H", "S2833002E", "V12345678"] {
+            assert_eq!(run(F1, Some("04-02-2025"), publico(nif)), Ok(()));
+        }
+        refused(run(F1, Some("04-02-2025"), publico("B87654321")), "1149");
+        let otro: &[IDDestinatario] = Box::leak(Box::new([IDDestinatario {
+            nombre_razon: String::from("MAIRIE"),
+            identificacion: IdentificacionDestinatario::Otro(IdOtro {
+                codigo_pais: Some(String::from("FR")),
+                id_type: IdOtroType::IdPaisResidencia,
+                id: String::from("P2807900B"),
+            }),
+        }]));
+        refused(run(F1, Some("04-02-2025"), otro), "1149");
+        // An IPSI line under 14 fails IPSI's list first (AEAT 1246, live
+        // 2026-10-22).
+        let ipsi = [DetalleDesglose {
+            impuesto: Some(Impuesto::Ipsi),
+            ..aapp[0].clone()
+        }];
+        refused(verdict(F2, DAY, &ipsi, |_| {}), "1246");
     }
 
     #[test]
@@ -931,5 +1314,38 @@ mod tests {
             "an F2 with destinatarios"
         );
         assert!(node(Modality::Conservation).is_ok());
+    }
+
+    /// `FechaOperacion` travels in its SI.xsd place, before
+    /// `DescripcionOperacion`, in every regime: bajo requerimiento AEAT
+    /// admits the date remission refuses.
+    #[test]
+    fn fecha_operacion_travels_in_every_regime() {
+        let lines = [iva_super()];
+        let node = |operacion: &str, modality| {
+            let ctx = EmissionContext {
+                descripcion_operacion: Some("venta"),
+                desglose: &lines,
+                fecha_operacion: Some(fecha(operacion)),
+                ..EmissionContext::default()
+            };
+            xml::record_node(&primer_alta_record(), &ctx, &obligado(), &sif(), modality)
+                .map_err(|error| error.to_string())
+        };
+        let on_the_wire = |operacion: &str| {
+            format!(
+                "<sum1:FechaOperacion>{operacion}</sum1:FechaOperacion>\
+                 <sum1:DescripcionOperacion>venta</sum1:DescripcionOperacion>"
+            )
+        };
+        let sent = node("31-01-2025", Modality::Remission).expect("an earlier operation");
+        assert!(sent.contains(&on_the_wire("31-01-2025")), "{sent}");
+        // The factura is dated 03-02-2025, generated that day.
+        refused(node("04-02-2025", Modality::Remission).map(drop), "1173");
+        let conserved = node("04-02-2025", Modality::Conservation).expect("admitted");
+        assert!(
+            conserved.contains(&on_the_wire("04-02-2025")),
+            "{conserved}"
+        );
     }
 }

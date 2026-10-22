@@ -360,6 +360,24 @@ fn fecha() -> impl Strategy<Value = FechaExpedicion> {
     })
 }
 
+/// The operation's date: none, or on or before the expedition (`seal`
+/// dates it 05-10-2026) within AEAT's twenty years, or, rarely, any day
+/// of any year.
+fn fecha_operacion() -> BoxedStrategy<Option<FechaExpedicion>> {
+    let day = |years: std::ops::RangeInclusive<u32>| {
+        (1_u32..=28, 1_u32..=12, years).prop_map(|(d, m, y)| {
+            FechaExpedicion::parse(&format!("{d:02}-{m:02}-{y:04}")).expect("dd-mm-yyyy")
+        })
+    };
+    let expedicion = FechaExpedicion::parse("05-10-2026").expect("dd-mm-yyyy");
+    prop_oneof![
+        WILD => Just(None),
+        WILD => prop_oneof![4 => day(2007..=2025), 1 => Just(expedicion)].prop_map(Some),
+        1 => day(0..=9999).prop_map(Some),
+    ]
+    .boxed()
+}
+
 /// The builtin series, a plausible custom prefix, or (rarely) any text.
 fn series() -> BoxedStrategy<Series> {
     prop_oneof![
@@ -456,6 +474,7 @@ struct AltaInput {
     importe_total: Money,
     descripcion: Option<String>,
     ref_externa: Option<String>,
+    fecha_operacion: Option<FechaExpedicion>,
     lines: Vec<DetalleDesglose>,
     destinatarios: Vec<IDDestinatario>,
     tipo_rectificativa: Option<TipoRectificativa>,
@@ -509,6 +528,7 @@ fn alta_input() -> impl Strategy<Value = AltaInput> {
                 (
                     proptest::option::weighted(0.99, text(500)),
                     proptest::option::of(text(60)),
+                    fecha_operacion(),
                 ),
                 lines,
                 destinatarios,
@@ -519,7 +539,7 @@ fn alta_input() -> impl Strategy<Value = AltaInput> {
         .prop_map(
             |(
                 (tipo, serie, number, cuota_total, importe_total),
-                (descripcion, ref_externa),
+                (descripcion, ref_externa, fecha_operacion),
                 lines,
                 destinatarios,
                 (tipo_rectificativa, rectificadas, importe_rectificacion),
@@ -532,6 +552,7 @@ fn alta_input() -> impl Strategy<Value = AltaInput> {
                 importe_total,
                 descripcion,
                 ref_externa,
+                fecha_operacion,
                 lines,
                 destinatarios,
                 tipo_rectificativa,
@@ -640,6 +661,7 @@ proptest! {
             tipo_rectificativa: input.tipo_rectificativa,
             facturas_rectificadas: &input.rectificadas,
             importe_rectificacion: input.importe_rectificacion.clone(),
+            fecha_operacion: input.fecha_operacion.clone(),
             destinatarios: &input.destinatarios,
             subsanacion: input.subsanacion,
             rechazo_previo: input.rechazo_previo,
@@ -862,6 +884,7 @@ fn both_issuer_regimes_remit_schema_valid() {
             importe_total: Money::from_cents(10_000 + cuota_total),
             descripcion: Some(String::from("medicamentos")),
             ref_externa: None,
+            fecha_operacion: None,
             lines: vec![line],
             destinatarios: destinatarios.to_vec(),
             tipo_rectificativa: None,

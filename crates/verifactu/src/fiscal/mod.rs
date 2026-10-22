@@ -342,10 +342,12 @@ pub struct FacturaId {
 }
 
 /// Whether a foreign `id` is a member state's NIF-IVA as AEAT checks it
-/// on the factura's date (Validaciones §3.1.3.13, Nota 1): the uppercase
-/// state prefix, then that state's number. Such a destinatario rides
-/// [`IdOtroType::NifIva`] and needs no `CodigoPais`; any other foreign
-/// identifier names its country.
+/// (Validaciones §3.1.3.13, Nota 1): the uppercase state prefix, then
+/// that state's number. Such a destinatario rides [`IdOtroType::NifIva`]
+/// and needs no `CodigoPais`; any other foreign identifier names its
+/// country. `fecha` is the operation's date, which decides Northern
+/// Ireland's `GB` or `XI`: the record's `FechaOperacion`, else its
+/// `FechaExpedicionFactura` (AEAT 1254, 1255).
 #[must_use]
 pub fn is_nif_iva(id: &str, fecha: &FechaExpedicion) -> bool {
     xml::is_nif_iva(id, fecha.ymd())
@@ -436,6 +438,13 @@ pub struct EmissionContext<'a> {
     pub facturas_rectificadas: &'a [FacturaId],
     /// Required on `Sustitutiva`, forbidden otherwise (Validaciones §3.6).
     pub importe_rectificacion: Option<ImporteRectificacion>,
+    /// The operation's date (`FechaOperacion`), when it differs from the
+    /// factura's expedition: a sale invoiced or rectified on a later day.
+    /// The dated rules read it, else `FechaExpedicionFactura`: the IVA
+    /// rates and their recargo (Validaciones §15.1, §15.3) and the UK
+    /// NIF-IVA prefix (Nota 1). It postdates the expedition only under
+    /// `ClaveRegimen` 14 or 15 (§3.1.3.1), and 14 requires it (§15.6.9).
+    pub fecha_operacion: Option<FechaExpedicion>,
     /// REQUIRED on `F1`/`F3`/`R1`–`R4` (AEAT 1189), optional on `F2`/`R5`.
     pub destinatarios: &'a [IDDestinatario],
     /// `S` marks a subsanación: a NEW record over the same `IDFactura` —

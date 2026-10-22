@@ -516,6 +516,77 @@ async fn a_refused_exchange_reaches_the_flat_face_as_the_operators() {
     );
 }
 
+/// A sustitutiva issued after its sale's rate ended declares the sale's
+/// date: `FechaOperacion` travels in its SI.xsd place, and AEAT checks
+/// the rate against it (Validaciones §15.1). Without it the draft is
+/// refused before a byte leaves.
+#[tokio::test]
+async fn a_draft_declares_its_operation_date() {
+    use crate::engine::{FakeSigner, FakeVerifactuTransport};
+    use crate::{
+        lines, CertificateSource, FacturaId, FechaExpedicion, IDDestinatario,
+        IdentificacionDestinatario, ImporteRectificacion, InvoiceDraft, Money, Series, TipoFactura,
+        TipoRectificativa,
+    };
+    let transport = std::sync::Arc::new(FakeVerifactuTransport::new());
+    let tenant = root()
+        .tenant(CertificateSource::Custom {
+            signer: std::sync::Arc::new(FakeSigner::new()),
+            transport: std::sync::Arc::clone(&transport) as _,
+        })
+        .obligado(Obligado {
+            nombre_razon: String::from("ANA RUIZ PEREZ"),
+            nif: String::from("12345678Z"),
+        })
+        .connect()
+        .expect("hermetic legs");
+    // The clock reads 03-02-2025; 5 % ended on 30-09-2024.
+    let venta = FechaExpedicion::parse("30-09-2024").expect("a real date");
+    let sustitutiva = || {
+        InvoiceDraft::new()
+            .serie(Series::R, 1)
+            .tipo(TipoFactura::R1)
+            .descripcion("sustituye la factura F00000007")
+            .destinatario(IDDestinatario {
+                nombre_razon: String::from("CLIENTE EJEMPLO SL"),
+                identificacion: IdentificacionDestinatario::Nif(String::from("B87654321")),
+            })
+            .rectificativa(
+                TipoRectificativa::Sustitutiva,
+                vec![FacturaId {
+                    nif: String::from("12345678Z"),
+                    num_serie: String::from("F00000007"),
+                    fecha_expedicion: venta.clone(),
+                }],
+                Some(ImporteRectificacion {
+                    base_rectificada: Money::from_cents(100_000),
+                    cuota_rectificada: Money::from_cents(5_000),
+                    cuota_recargo_rectificado: None,
+                }),
+            )
+            .line(lines::sujeta_iva(500, 100_000))
+    };
+    let error = tenant
+        .emit_invoice(sustitutiva(), None)
+        .await
+        .expect_err("5 % is no rate on 03-02-2025");
+    assert!(error.to_string().contains("§15.1"), "{error}");
+    tenant
+        .emit_invoice(sustitutiva().fecha_operacion(venta.clone()), None)
+        .await
+        .expect("5 % is the rate on 30-09-2024");
+    let sent = transport.sent_envelopes();
+    assert_eq!(sent.len(), 1, "the refused draft never left");
+    assert!(
+        sent[0].contains(
+            "</sum1:ImporteRectificacion><sum1:FechaOperacion>30-09-2024</sum1:FechaOperacion>\
+             <sum1:DescripcionOperacion>"
+        ),
+        "{}",
+        sent[0]
+    );
+}
+
 /// The bring-your-own door: both custody models wire over injected
 /// legs with no HTTP stack — the emitted envelope travels the
 /// injected transport, and (remission law) the alta rides unsigned.

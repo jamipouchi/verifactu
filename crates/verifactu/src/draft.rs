@@ -2,7 +2,7 @@
 //! record and its chain cursor out.
 
 use crate::builder::Environment;
-use crate::domain::chain::{ChainKind, ChainRecord, Predecessor, TipoFactura};
+use crate::domain::chain::{ChainKind, ChainRecord, FechaExpedicion, Predecessor, TipoFactura};
 use crate::domain::money::Money;
 use crate::domain::series::Series;
 use crate::fiscal::{
@@ -168,6 +168,7 @@ pub struct InvoiceDraft {
         Vec<FacturaId>,
         Option<ImporteRectificacion>,
     )>,
+    fecha_operacion: Option<FechaExpedicion>,
     ref_externa: Option<String>,
 }
 
@@ -222,6 +223,20 @@ impl InvoiceDraft {
         importe_rectificacion: Option<ImporteRectificacion>,
     ) -> Self {
         self.rectificativa = Some((tipo, facturas, importe_rectificacion));
+        self
+    }
+
+    /// The operation's date (`FechaOperacion`), when it differs from the
+    /// issue date: a sale rectified by substitution on a later day. AEAT
+    /// checks the IVA rates against it (Validaciones §15.1, §15.3), so a
+    /// sustitutiva keeps the rate its sale was made at, even one since
+    /// ended. It lies within twenty years back and the year after the
+    /// current one (§3.1.3.7), and after the issue date (or the record's
+    /// generation) only when every IVA and IGIC line declares
+    /// `ClaveRegimen` 14 or 15 (§3.1.3.1, §3.1.3.7).
+    #[must_use]
+    pub fn fecha_operacion(mut self, fecha: FechaExpedicion) -> Self {
+        self.fecha_operacion = Some(fecha);
         self
     }
 
@@ -327,6 +342,7 @@ impl InvoiceDraft {
             lines: self.lines,
             destinatarios: self.destinatarios,
             rectificativa: self.rectificativa,
+            fecha_operacion: self.fecha_operacion,
             ref_externa: self.ref_externa,
             macrodato: importe_total.abs() >= MACRODATO_CENTS,
         })
@@ -349,6 +365,7 @@ struct Built {
         Vec<FacturaId>,
         Option<ImporteRectificacion>,
     )>,
+    fecha_operacion: Option<FechaExpedicion>,
     ref_externa: Option<String>,
     macrodato: bool,
 }
@@ -452,6 +469,7 @@ pub async fn emit_draft(
         tipo_rectificativa,
         facturas_rectificadas,
         importe_rectificacion,
+        fecha_operacion: built.fecha_operacion,
         destinatarios: built.destinatarios.as_slice(),
         macrodato: built.macrodato.then_some(SiNo::Si),
         ..EmissionContext::default()
