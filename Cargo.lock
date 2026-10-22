@@ -2619,7 +2619,7 @@ checksum = "a27f7d40a93824eefcf6b62fd2fa86bca9ea6a5825de56b4aa9a5ed7804b766c"
 
 [[package]]
 name = "verifactu"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "base64",
