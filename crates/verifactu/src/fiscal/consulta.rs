@@ -59,6 +59,63 @@ impl Mes {
     }
 }
 
+/// `FiltroConsulta/FechaExpedicionFactura` (`FechaExpedicionConsultaType`):
+/// the records issued on one day, or within a range open at either end.
+/// It narrows the period's records and does not replace the period: a
+/// record declaring an earlier operation lands in that operation's
+/// month, before its issue date.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FechaExpedicionConsulta<'a> {
+    /// `FechaExpedicionFactura`: issued that day.
+    Fecha(&'a FechaExpedicion),
+    /// `RangoFechaExpedicion`: issued from `desde` to `hasta`, both
+    /// included; `None` leaves that end open, and with neither the
+    /// range narrows nothing (live-confirmed at pruebas 2026-10-23).
+    /// With both, `desde` comes first (AEAT 1250).
+    Rango {
+        desde: Option<&'a FechaExpedicion>,
+        hasta: Option<&'a FechaExpedicion>,
+    },
+}
+
+impl FechaExpedicionConsulta<'_> {
+    /// AEAT 1250: "fecha desde debe ser menor que ... fecha hasta",
+    /// strictly (live-confirmed at pruebas 2026-10-23: `Desde` equal to
+    /// `Hasta` answers 1250); one day is [`Self::Fecha`].
+    fn check(self) -> Result<(), xml::SerializeError> {
+        match self {
+            Self::Rango {
+                desde: Some(desde),
+                hasta: Some(hasta),
+            } if desde.ymd() >= hasta.ymd() => Err(xml::SerializeError::Field {
+                field: "Consulta/FechaExpedicionFactura/RangoFechaExpedicion",
+                problem: String::from("Desde must precede Hasta (AEAT 1250)"),
+            }),
+            _ => Ok(()),
+        }
+    }
+
+    /// The wrapper is declared in ConsultaLR.xsd, its content in SI.xsd's
+    /// `FechaExpedicionConsultaType` (SW description §11.1.1.3's example).
+    fn render(self, out: &mut String) {
+        out.push_str("<sfC:FechaExpedicionFactura>");
+        match self {
+            Self::Fecha(fecha) => tag(out, "sum1:FechaExpedicionFactura", fecha.as_str()),
+            Self::Rango { desde, hasta } => {
+                out.push_str("<sum1:RangoFechaExpedicion>");
+                if let Some(desde) = desde {
+                    tag(out, "sum1:Desde", desde.as_str());
+                }
+                if let Some(hasta) = hasta {
+                    tag(out, "sum1:Hasta", hasta.as_str());
+                }
+                out.push_str("</sum1:RangoFechaExpedicion>");
+            }
+        }
+        out.push_str("</sfC:FechaExpedicionFactura>");
+    }
+}
+
 /// The query window + narrowing keys (`LRFiltroRegFacturacionType`),
 /// and what the answer should carry (`DatosAdicionalesRespuestaType`).
 /// The period is the record's `PeriodoImputacion`, where it lands: the
@@ -76,6 +133,10 @@ pub struct ConsultaFilter<'a> {
     pub ejercicio: u16,
     pub mes: Mes,
     pub num_serie: Option<&'a str>,
+    /// The issue date or range, within the period
+    /// ([`fecha_expedicion`](method@Self::fecha_expedicion),
+    /// [`rango_fecha_expedicion`](method@Self::rango_fecha_expedicion)).
+    pub fecha_expedicion: Option<FechaExpedicionConsulta<'a>>,
     pub ref_externa: Option<&'a str>,
     /// `DatosAdicionalesRespuesta/MostrarSistemaInformatico=S`: AEAT
     /// answers each record's stored `SistemaInformatico`
@@ -93,6 +154,7 @@ impl<'a> ConsultaFilter<'a> {
             ejercicio,
             mes,
             num_serie: None,
+            fecha_expedicion: None,
             ref_externa: None,
             mostrar_sistema_informatico: false,
         }
@@ -102,6 +164,26 @@ impl<'a> ConsultaFilter<'a> {
     #[must_use]
     pub fn num_serie(mut self, num_serie: &'a str) -> Self {
         self.num_serie = Some(num_serie);
+        self
+    }
+
+    /// Only the records issued on `fecha`.
+    #[must_use]
+    pub fn fecha_expedicion(mut self, fecha: &'a FechaExpedicion) -> Self {
+        self.fecha_expedicion = Some(FechaExpedicionConsulta::Fecha(fecha));
+        self
+    }
+
+    /// Only the records issued from `desde` to `hasta`, both included;
+    /// `None` leaves that end open. With both, `desde` must come first
+    /// (AEAT 1250).
+    #[must_use]
+    pub fn rango_fecha_expedicion(
+        mut self,
+        desde: Option<&'a FechaExpedicion>,
+        hasta: Option<&'a FechaExpedicion>,
+    ) -> Self {
+        self.fecha_expedicion = Some(FechaExpedicionConsulta::Rango { desde, hasta });
         self
     }
 
@@ -330,7 +412,8 @@ pub struct ConsultaAnswer {
 
 /// # Errors
 /// [`EmitError::InvalidRecord`] when any SI.xsd simple type is
-/// violated (NIF, text lengths, the period codes).
+/// violated (NIF, text lengths, the period codes), or an issue-date
+/// range's `Desde` does not precede its `Hasta` (AEAT 1250).
 pub(crate) fn consulta_document(request: &ConsultaRequest<'_>) -> Result<String, EmitError> {
     xml::check_nif("Consulta/ObligadoEmision/NIF", &request.obligado.nif)?;
     xml::check_text(
@@ -348,6 +431,9 @@ pub(crate) fn consulta_document(request: &ConsultaRequest<'_>) -> Result<String,
     }
     if let Some(num_serie) = request.filtro.num_serie {
         xml::check_num_serie("Consulta/NumSerieFactura", num_serie)?;
+    }
+    if let Some(fecha) = request.filtro.fecha_expedicion {
+        fecha.check()?;
     }
     if let Some(ref_externa) = request.filtro.ref_externa {
         xml::check_text("Consulta/RefExterna", ref_externa, 60)?;
@@ -399,6 +485,9 @@ pub(crate) fn consulta_document(request: &ConsultaRequest<'_>) -> Result<String,
     out.push_str("</sfC:PeriodoImputacion>");
     if let Some(num_serie) = request.filtro.num_serie {
         tag(&mut out, "sfC:NumSerieFactura", num_serie);
+    }
+    if let Some(fecha) = request.filtro.fecha_expedicion {
+        fecha.render(&mut out);
     }
     if let Some(ref_externa) = request.filtro.ref_externa {
         tag(&mut out, "sfC:RefExterna", ref_externa);
@@ -718,7 +807,7 @@ mod tests {
         ConsultaRequest, ConsultaSpec, EstadoAlmacenado, Mes, RegistroSpec, ResultadoConsulta,
         SistemaInformaticoAlmacenado,
     };
-    use crate::domain::chain::huella_alta_montos;
+    use crate::domain::chain::{huella_alta_montos, FechaExpedicion};
     use crate::domain::money::Money;
     use crate::fiscal::{IdOtro, IdOtroType, IdentificacionDestinatario, Obligado, UsoPosible};
 
@@ -962,6 +1051,105 @@ mod tests {
             ),
             "{document}"
         );
+    }
+
+    /// The issue-date filter rides `FiltroConsulta` between
+    /// `NumSerieFactura` and `RefExterna`, its wrapper sfC and its
+    /// content SI, as AEAT's example spells it (SW description
+    /// §11.1.1.3); an open end leaves its bound out.
+    #[test]
+    fn the_issue_date_filter_renders_in_its_xsd_place() {
+        let obligado = obligado();
+        let render = |filtro: &ConsultaFilter<'_>| {
+            consulta_document(&ConsultaRequest {
+                obligado: &obligado,
+                apoderado: false,
+                filtro,
+                clave_paginacion: None,
+            })
+            .expect("the request renders")
+        };
+        let fecha = |text: &str| FechaExpedicion::parse(text).expect("a real date");
+        let (desde, hasta) = (fecha("02-11-2024"), fecha("13-11-2024"));
+        let filtro = ConsultaFilter::new(2024, Mes::try_new(11).expect("noviembre"))
+            .num_serie("T00000007")
+            .ref_externa("REF-1");
+        assert_eq!(filtro.fecha_expedicion, None, "new leaves it unset");
+        let document = render(&filtro);
+        assert!(!document.contains("FechaExpedicion"), "{document}");
+
+        let around = |inner: &str| {
+            format!(
+                "<sfC:NumSerieFactura>T00000007</sfC:NumSerieFactura>\
+                 <sfC:FechaExpedicionFactura>{inner}</sfC:FechaExpedicionFactura>\
+                 <sfC:RefExterna>REF-1</sfC:RefExterna>"
+            )
+        };
+        for (narrowed, inner) in [
+            (
+                filtro.fecha_expedicion(&desde),
+                "<sum1:FechaExpedicionFactura>02-11-2024</sum1:FechaExpedicionFactura>",
+            ),
+            (
+                filtro.rango_fecha_expedicion(Some(&desde), Some(&hasta)),
+                "<sum1:RangoFechaExpedicion><sum1:Desde>02-11-2024</sum1:Desde>\
+                 <sum1:Hasta>13-11-2024</sum1:Hasta></sum1:RangoFechaExpedicion>",
+            ),
+            (
+                filtro.rango_fecha_expedicion(Some(&desde), None),
+                "<sum1:RangoFechaExpedicion><sum1:Desde>02-11-2024</sum1:Desde>\
+                 </sum1:RangoFechaExpedicion>",
+            ),
+            (
+                filtro.rango_fecha_expedicion(None, Some(&hasta)),
+                "<sum1:RangoFechaExpedicion><sum1:Hasta>13-11-2024</sum1:Hasta>\
+                 </sum1:RangoFechaExpedicion>",
+            ),
+        ] {
+            let document = render(&narrowed);
+            assert!(document.contains(&around(inner)), "{document}");
+        }
+    }
+
+    /// AEAT 1250 on both edges: a range admits `Desde` a day before
+    /// `Hasta` and either end open, and refuses `Desde` on or after
+    /// `Hasta`, naming the field and the rule.
+    #[test]
+    fn a_range_runs_forward() {
+        let obligado = obligado();
+        let render = |filtro: &ConsultaFilter<'_>| {
+            consulta_document(&ConsultaRequest {
+                obligado: &obligado,
+                apoderado: false,
+                filtro,
+                clave_paginacion: None,
+            })
+        };
+        let fecha = |text: &str| FechaExpedicion::parse(text).expect("a real date");
+        let filtro = ConsultaFilter::new(2026, Mes::try_new(10).expect("octubre"));
+        // Each pair crosses a field of the date: day, month, year.
+        for (antes, despues) in [
+            ("14-10-2026", "15-10-2026"),
+            ("31-10-2026", "01-11-2026"),
+            ("31-12-2025", "01-01-2026"),
+        ] {
+            let (antes, despues) = (fecha(antes), fecha(despues));
+            render(&filtro.rango_fecha_expedicion(Some(&antes), Some(&despues)))
+                .expect("Desde a day before Hasta");
+            for (desde, hasta) in [(&antes, &antes), (&despues, &antes)] {
+                let error = render(&filtro.rango_fecha_expedicion(Some(desde), Some(hasta)))
+                    .expect_err("Desde on or after Hasta");
+                let text = error.to_string();
+                assert!(
+                    text.contains("RangoFechaExpedicion") && text.contains("AEAT 1250"),
+                    "{text}"
+                );
+            }
+        }
+        let dia = fecha("15-10-2026");
+        render(&filtro.rango_fecha_expedicion(Some(&dia), None)).expect("open Hasta");
+        render(&filtro.rango_fecha_expedicion(None, Some(&dia))).expect("open Desde");
+        render(&filtro.fecha_expedicion(&dia)).expect("one day");
     }
 
     fn sistema(identificacion: IdentificacionDestinatario) -> SistemaInformaticoAlmacenado {

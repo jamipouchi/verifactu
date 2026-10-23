@@ -26,10 +26,10 @@ use verifactu::engine::{
 use verifactu::lines::RegimenEmisor;
 use verifactu::{
     CalificacionOperacion, ChainKind, ClaveRegimen, ConsultaFilter, DetalleDesglose,
-    EstadoAlmacenado, FacturaId, FechaExpedicion, FechaHuso, IDDestinatario, IdOtro, IdOtroType,
-    IdentificacionDestinatario, ImporteRectificacion, Impuesto, Mes, Modality, Money, Obligado,
-    OperacionExenta, Predecessor, Series, SistemaInformaticoAlmacenado, TipoFactura,
-    TipoRectificativa, UsoPosible,
+    EstadoAlmacenado, FacturaId, FechaExpedicion, FechaExpedicionConsulta, FechaHuso,
+    IDDestinatario, IdOtro, IdOtroType, IdentificacionDestinatario, ImporteRectificacion, Impuesto,
+    Mes, Modality, Money, Obligado, OperacionExenta, Predecessor, Series,
+    SistemaInformaticoAlmacenado, TipoFactura, TipoRectificativa, UsoPosible,
 };
 
 // ---- the oracle --------------------------------------------------------
@@ -417,6 +417,35 @@ fn fecha() -> impl Strategy<Value = FechaExpedicion> {
     })
 }
 
+/// The consulta's issue-date filter, owned (`FechaExpedicionConsulta`
+/// borrows): one day, or a range with either end open or both set, in
+/// either order.
+#[derive(Clone, Debug)]
+enum FechaFiltro {
+    Fecha(FechaExpedicion),
+    Rango(Option<FechaExpedicion>, Option<FechaExpedicion>),
+}
+
+impl FechaFiltro {
+    fn borrowed(&self) -> FechaExpedicionConsulta<'_> {
+        match self {
+            Self::Fecha(fecha) => FechaExpedicionConsulta::Fecha(fecha),
+            Self::Rango(desde, hasta) => FechaExpedicionConsulta::Rango {
+                desde: desde.as_ref(),
+                hasta: hasta.as_ref(),
+            },
+        }
+    }
+}
+
+fn fecha_filtro() -> impl Strategy<Value = FechaFiltro> {
+    prop_oneof![
+        fecha().prop_map(FechaFiltro::Fecha),
+        (proptest::option::of(fecha()), proptest::option::of(fecha()))
+            .prop_map(|(desde, hasta)| FechaFiltro::Rango(desde, hasta)),
+    ]
+}
+
 /// The operation's date: none, or on or before the expedition (`seal`
 /// dates it 05-10-2026) within AEAT's twenty years, or, rarely, any day
 /// of any year.
@@ -744,6 +773,7 @@ proptest! {
         ejercicio in prop_oneof![2024_u16..=2030, 0_u16..=u16::MAX],
         mes in 1_u8..=12,
         num_serie in proptest::option::of(num_serie()),
+        fecha_expedicion in proptest::option::of(fecha_filtro()),
         ref_externa in proptest::option::of(text(60)),
         clave in proptest::option::of((nif(), num_serie(), "[0-9]{2}-[0-9]{2}-[0-9]{4}")),
         mostrar_sistema_informatico in proptest::bool::ANY,
@@ -761,6 +791,7 @@ proptest! {
         let emitter = emitter.with_transport(Arc::clone(&transport) as _);
         let mut filtro = ConsultaFilter::new(ejercicio, Mes::try_new(mes).expect("1..=12"));
         filtro.num_serie = num_serie.as_deref();
+        filtro.fecha_expedicion = fecha_expedicion.as_ref().map(FechaFiltro::borrowed);
         filtro.ref_externa = ref_externa.as_deref();
         filtro.mostrar_sistema_informatico = mostrar_sistema_informatico;
         let clave = clave.map(|(id_emisor_factura, num_serie_factura, fecha_expedicion_factura)| {

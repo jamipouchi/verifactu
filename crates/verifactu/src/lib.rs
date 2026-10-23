@@ -141,8 +141,8 @@ pub use crate::domain::series::checked_format as try_format_num_serie;
 pub use crate::domain::series::format as format_num_serie;
 pub use crate::domain::series::Series;
 pub use crate::fiscal::consulta::{
-    ConsultaAnswer, ConsultaFilter, EstadoAlmacenado, Mes, RegistroConsulta,
-    SistemaInformaticoAlmacenado,
+    ConsultaAnswer, ConsultaFilter, EstadoAlmacenado, FechaExpedicionConsulta, Mes,
+    RegistroConsulta, SistemaInformaticoAlmacenado,
 };
 pub use crate::fiscal::response;
 pub use crate::fiscal::transport::{
