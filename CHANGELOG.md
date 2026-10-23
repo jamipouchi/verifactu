@@ -4,6 +4,31 @@ Notable changes to `verifactu`. Consumers pin the crate by git rev; each
 entry states its semver impact against the last pinned rev. While the
 crate is 0.x, a breaking change bumps the minor version.
 
+## [0.3.0] — 2026-10-23
+
+Measured against `8234d1a` (0.2.0). Semver: minor bump, 0.2 → 0.3, for
+one breaking change. Error codes unchanged.
+
+### Added — breaking
+
+- **The consulta filters by issue date** (`FiltroConsulta/FechaExpedicionFactura`).
+  `ConsultaFilter::fecha_expedicion(&fecha)` asks for one day;
+  `ConsultaFilter::rango_fecha_expedicion(desde, hasta)` for a range,
+  either end open (`None`), both ends inclusive. It narrows within the
+  period and does not replace it. A range whose `Desde` is not before its
+  `Hasta` is refused as `fiscal.invalid-record` (AEAT 1250).
+
+  Migration: a `ConsultaFilter { .. }` literal adds
+  `fecha_expedicion: None`; `ConsultaFilter::new` already sets it.
+
+### Live-confirmed at AEAT pruebas, 2026-10-23
+
+- `Desde` and `Hasta` include their own day; `Desde` equal to `Hasta`
+  answers 1250, as the code reads.
+- A range with neither end narrows nothing; a future `Desde` is admitted.
+- The issue date filters a record filed under an earlier operation's
+  month by its own date.
+
 ## [0.2.0] — 2026-10-22
 
 Measured against `94767d6`, the last pinned rev. A consumer pinned
